@@ -1,0 +1,139 @@
+---
+title: 'Capability tiers'
+description: 'The three-tier feature status model that governs what is legal in ProblemIR, what is numerically implemented, and what is fully wired end-to-end for public use.'
+keywords: ['capability', 'tiers', 'semantic-only', 'internal-reference', 'public-executable', 'feature status', 'planning']
+---
+
+Every feature in Fullmag is tagged with exactly one of three capability tiers. The same tag appears consistently in Python errors, CLI output, API responses, browser badges, and documentation. No feature is "sort of supported."
+
+## Three tiers
+
+<CardGroup cols={3}>
+  <Card title="semantic-only" icon="tag">
+    Legal in the Python API and `ProblemIR`. Can be serialized, validated, and planned. Not numerically implemented. Attempting to run will produce a clear capability error.
+  </Card>
+  <Card title="internal-reference" icon="flask">
+    Numerically implemented inside `fullmag-engine` or an equivalent crate, but not wired to the public `Simulation.run()` path. Available for internal calibration and testing only.
+  </Card>
+  <Card title="public-executable" icon="circle-check">
+    Fully wired end-to-end: Python `Simulation.run()` → plan → runner → engine → artifacts. This is the only tier you can rely on in production scripts.
+  </Card>
+</CardGroup>
+
+## What each tier means in practice
+
+<AccordionGroup>
+  <Accordion title="semantic-only">
+    A `semantic-only` feature is part of the public Python API and the `ProblemIR` schema. You can write it in your script, and it will serialize and validate without error. However, the planner will refuse to produce an executable plan that uses it.
+
+    Use `semantic-only` features to describe the physical model you intend to simulate. When the feature becomes executable, your script will work without modification.
+
+    **Example**: `fm.Cylinder(...)` can be placed in a script today. The planner will report that `Cylinder` geometry requires an active-mask voxelizer that is not yet wired.
+  </Accordion>
+  <Accordion title="internal-reference">
+    An `internal-reference` feature has a working numerical implementation but it is not exposed through the public `Simulation.run()` path. It may be used by the development team for calibration, benchmarking, or testing.
+
+    **Example**: `Magnetoelastic` has a small-strain implementation with prescribed-strain H_mel wired into H_eff, but it is not accessible from a public `Simulation.run()` call.
+  </Accordion>
+  <Accordion title="public-executable">
+    A `public-executable` feature is fully wired from Python authoring through planning and runner dispatch to artifact output. You can use it in production scripts with confidence.
+
+    Not all backends are equally covered. The tier table below specifies which combination of feature + backend + precision is actually executable.
+  </Accordion>
+</AccordionGroup>
+
+## Capability matrix
+
+| Feature | FDM | FEM | Hybrid | Tier | Notes |
+|---------|-----|-----|--------|------|-------|
+| `Box` geometry | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Box→grid lowering for FDM and Box→mesh lowering for FEM |
+| `Cylinder` geometry | planned | planned | planned | **semantic-only** | Requires active-mask voxelizer for accurate curved-boundary FDM execution |
+| Imported geometry ref | planned | planned | planned | **semantic-only** | FDM planner accepts it when a precomputed grid asset is attached; public execution still depends on voxelization extras |
+| Material constants (`Ms`, `A`, `alpha`) | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Used by the CPU reference FDM runner and bootstrap FEM CPU reference runner |
+| Material constants (`Ku1`, `anisU`) | planned | planned | planned | **semantic-only** | Anisotropy not in exchange-only scope |
+| Ferromagnet + uniform `m0` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Lowered to per-cell vectors for FDM and per-node vectors for FEM |
+| Ferromagnet + random `m0` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Deterministic xorshift64 RNG in planner |
+| Multiple `Ferromagnet` bodies + global demag | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | FDM uses multilayer-convolution for eligible z-stacks, with CPU reference, a native CUDA single-grid fast path for compatible stacks, and `cuda-assisted` fallback; CUDA multilayer paths honor `execution_precision` across native fast path and assisted paths; FEM merges disjoint mesh assets into one bootstrap plan |
+| `Exchange` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | CPU 6-point stencil in FDM; lumped-mass P1 operator in FEM |
+| `Demag` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | FDM uses Newell tensor FFT; FEM uses a bootstrap transfer-grid demag seam (CPU reference and native MFEM path) |
+| `InterfacialDMI` | planned | planned | planned | **semantic-only** | Not numerically implemented |
+| `Zeeman` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Public API authors `B`; planner normalizes to `H_ext` in A/m |
+| `Magnetoelastic` | planned | planned | planned | **internal-reference** | Small-strain coupling (B1/B2 cubic, λ_s isotropic); prescribed-strain H_mel wired into H_eff |
+| `LLG` (Heun) | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Heun stepper in `fullmag-engine` |
+| `Relaxation(llg_overdamped)` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Shared `StudyIR::Relaxation` with torque / energy / max-step stopping |
+| `Relaxation(projected_gradient_bb)` | ✅ exec | planned | planned | **public-executable** (FDM) | Barzilai–Borwein on sphere product manifold with Armijo backtracking |
+| `Relaxation(nonlinear_cg)` | ✅ exec | planned | planned | **public-executable** (FDM) | Polak–Ribière+ CG with tangent-space vector transport and periodic restarts |
+| `Relaxation(tangent_plane_implicit)` | planned | planned | planned | **semantic-only** | Canonical production-target FEM relaxation family; execution deferred |
+| Precision `double` | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Current CPU reference precision for both backends |
+| Precision `single` | ✅ exec | planned | planned | **public-executable** (CUDA FDM) | Public CUDA FDM supports calibrated `single`; CPU reference FDM is `double`-only |
+| Field outputs (`m`, `H_ex`, `H_ext`, `H_eff`, `E_ex`, `E_ext`, `E_total`) | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Common artifact layout for current FDM/FEM executable slices |
+| FEM demag outputs (`H_demag`, `E_demag`) | ✅ exec | ✅ exec | planned | **public-executable** (FDM/FEM) | Bootstrap FEM CPU reference emits demag outputs through the same quantity/artifact contract as FDM |
+| FDM hints | ✅ exec | n/a | planned | **public-executable** | Cell size → grid dims in planner |
+| FEM hints | n/a | ✅ exec | planned | **public-executable** (FEM) | Planner builds `FemPlanIR`; execution currently requires `MeshIR` or external meshing extras |
+| Hybrid hints | n/a | n/a | planned | **semantic-only** | Requires hybrid mode and backend |
+
+## Checking capability before running
+
+`Simulation.plan()` returns the capability status for your problem without starting execution:
+
+```python
+import fullmag as fm
+
+geom = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+mat  = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.02)
+mag  = fm.Ferromagnet(name="strip", geometry=geom, material=mat, m0=fm.init.uniform([1, 0, 0]))
+
+problem = fm.Problem(
+    name="capability_check",
+    magnets=[mag],
+    energy=[fm.Exchange(), fm.Demag()],
+    study=fm.Relaxation(algorithm="llg_overdamped", max_steps=5000),
+    discretization=fm.DiscretizationHints(fdm=fm.FDM(cell=(2e-9, 2e-9, 2e-9))),
+)
+
+plan = fm.Simulation(problem, backend="fdm", precision="double").plan()
+
+print(plan.capability_status)   # "public-executable" | "semantic-only" | "internal-reference"
+print(plan.chosen_backend)      # resolved backend
+print(plan.diagnostics)         # human-readable explanation
+```
+
+If any feature in the problem is `semantic-only`, `plan()` will report which feature blocked execution and why.
+
+## Notes on specific features
+
+<Warning>
+The following features are currently `semantic-only`. Including them in a problem will produce a capability error at planning time:
+
+- **`Cylinder` geometry** — Curved-boundary FDM execution requires an active-mask voxelizer that is not yet wired to the public execution path.
+- **`Hybrid` backend** — Coupled FDM/FEM planning is not yet implemented. `backend="hybrid"` with `mode="hybrid"` is legal in Python and `ProblemIR` but will not produce an executable plan.
+- **`InterfacialDMI`** — No numerical implementation exists. The term can be included in the energy list and will serialize, validate, and appear in `ProblemIR`, but execution will be blocked by the planner.
+</Warning>
+
+<Note>
+**CUDA single precision status**: `precision="single"` is `public-executable` on CUDA FDM. The CPU reference FDM runner is `double`-only. GPU `double` parity is required before GPU `single` is considered stable; use `double` as the trusted reference when calibrating results.
+</Note>
+
+## Capability tags in practice
+
+The same tier tag appears everywhere the user encounters a feature:
+
+- **Python errors**: `CapabilityError: 'Cylinder' geometry is semantic-only. Requires active-mask voxelizer.`
+- **CLI output**: the `fullmag plan` command prints a capability summary table.
+- **API responses**: `/v1/sessions/:id` includes `capability_status` in the plan summary.
+- **Browser badges**: the run page shows tier badges next to each feature in the problem summary.
+- **Documentation**: every feature page states its current tier.
+
+<Tip>
+Run `fullmag plan script.py` before submitting long jobs. The planner will report the capability status, resolved backend, and any blocking features without starting execution.
+</Tip>
+
+## Auto-backend resolution
+
+When `backend="auto"`, the planner applies deterministic resolution rules:
+
+- For `mode="strict"` and `mode="extended"`: resolves to `fdm` during bootstrap planning.
+- For `mode="hybrid"`: raises a planning error. Hybrid requires an explicit `backend="hybrid"`.
+- Hybrid planning is a deliberate opt-in, never a fallback from `auto`.
+
+The resolved backend and the reason for the resolution are always recorded in the `ExecutionPlanIR` and the artifact `execution_plan.json`.

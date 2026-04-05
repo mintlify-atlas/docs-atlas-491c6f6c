@@ -1,0 +1,287 @@
+---
+title: "Installation"
+description: "Install the Fullmag Python package, CLI launcher, and optional GPU backends."
+---
+
+## System requirements
+
+| Requirement | Minimum |
+|-------------|---------|
+| Python | 3.10 or later |
+| Rust | nightly (for building the CLI) |
+| CUDA toolkit | Optional — enables CUDA FDM and FEM GPU backends |
+| Docker + Docker Compose | Optional — recommended for the full dev workflow |
+| CMake | Optional — required for native CUDA/FEM backend builds |
+
+<Note>
+The Python package (`fullmag-py`) and the Rust CLI (`fullmag-cli`) are independent installable components. You can install the Python package alone for IR authoring and validation without building the CLI.
+</Note>
+
+---
+
+## Python package
+
+The Python package provides the embedded DSL, `ProblemIR` serialization, meshing utilities, and the local simulation runtime.
+
+### Core install
+
+```bash
+pip install -e packages/fullmag-py
+```
+
+### With meshing dependencies
+
+The `[meshing]` extra adds FEM geometry tools:
+
+```bash
+pip install -e 'packages/fullmag-py[meshing]'
+```
+
+**Dependencies installed by `[meshing]`:**
+
+| Package | Version |
+|---------|---------|
+| `numpy` | `>=1.24` |
+| `zarr` | `>=2.18,<3` |
+| `h5py` | `>=3.9` |
+| `gmsh` | `>=4.12` |
+| `meshio` | `>=5.3` |
+| `scipy` | `>=1.10` |
+| `trimesh` | `>=4.2` |
+
+### Recommended: virtualenv
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e 'packages/fullmag-py[meshing]'
+```
+
+### Run the Python tests
+
+```bash
+python -m unittest discover -s packages/fullmag-py/tests -v
+```
+
+---
+
+## CLI launcher
+
+The `fullmag` CLI is a Rust binary that hosts the execution chain: it spawns a Python helper in your active environment, validates and plans the `ProblemIR`, and manages session lifecycle.
+
+<Tabs>
+  <Tab title="Linux / macOS (just)">
+    ```bash
+    just build fullmag
+    export PATH="$PWD/.fullmag/local/bin:$PATH"
+    fullmag --help
+    ```
+
+    `just build fullmag` calls `make install-cli` internally and auto-detects CUDA and CMake.
+  </Tab>
+  <Tab title="Linux / macOS (make)">
+    ```bash
+    make install-cli
+    export PATH="$PWD/.fullmag/local/bin:$PATH"
+    fullmag --help
+    ```
+  </Tab>
+</Tabs>
+
+After the build, the resolved build mode is written to `.fullmag/local/launcher-build-mode`. Possible values:
+
+| Build mode | Meaning |
+|------------|---------|
+| `cpu` | CPU-only FDM, no CUDA |
+| `cuda` | CUDA FDM enabled |
+| `cuda-fem-gpu` | CUDA FDM + host FEM GPU backend |
+| `cuda+managed-fem-gpu-host` | CUDA FDM + managed FEM GPU runtime bundle |
+
+To make the PATH addition permanent, add the following to your shell profile:
+
+```bash
+export PATH="$PWD/.fullmag/local/bin:$PATH"
+```
+
+### Verify the CLI
+
+```bash
+fullmag --help
+fullmag examples/exchange_relax.py --json
+```
+
+---
+
+## Dev container (Docker)
+
+The Docker dev container is the canonical verification environment. It includes Rust nightly, Python 3, Node 22, pnpm 10, and all C++ build dependencies.
+
+### 1. Configure environment variables
+
+```bash
+cp .env.example .env
+# Edit .env and set real values:
+# POSTGRES_PASSWORD=change-me
+# MINIO_ROOT_USER=fullmag
+# MINIO_ROOT_PASSWORD=change-me-minio
+```
+
+<Warning>
+Never commit `.env` with real credentials. The `.env.example` file ships with placeholder values only.
+</Warning>
+
+### 2. Bring up the dev container
+
+```bash
+make up
+make shell
+```
+
+`make up` starts the `dev`, `postgres`, `minio`, and `nats` services defined in `compose.yaml`. `make shell` opens a bash session in the `dev` container.
+
+### 3. Verify the bootstrap inside the container
+
+```bash
+cargo check --workspace
+cargo test --workspace
+cargo build -p fullmag-cli --bin fullmag
+
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e 'packages/fullmag-py[meshing]'
+
+python -m unittest discover -s packages/fullmag-py/tests -v
+python3 scripts/check_repo_consistency.py
+python scripts/run_python_ir_smoke.py --cli target/debug/fullmag
+
+# Run the CPU reference demo
+cargo run -p fullmag-cli --bin fullmag -- reference-exchange-demo --steps 10 --dt 1e-13
+
+# Run the exchange-only example via the CLI
+cargo run -p fullmag-cli --bin fullmag -- examples/exchange_relax.py --json
+```
+
+### Docker services
+
+The `compose.yaml` defines the following services:
+
+| Service | Image | Role |
+|---------|-------|------|
+| `dev` | `fullmag/dev:local` | Main development environment |
+| `postgres` | `postgres:17-alpine` | Session and artifact metadata store |
+| `minio` | `minio/minio` | S3-compatible artifact object store |
+| `nats` | `nats:2.11-alpine` | Message bus |
+| `fem-gpu` | `fullmag/fem-gpu:local` | FEM GPU build and test environment (profile: `fem-gpu`) |
+
+### Useful make targets
+
+```bash
+make up              # Start dev + postgres + minio + nats
+make down            # Stop all services
+make shell           # Open shell in dev container
+make cargo-check     # Run cargo check (no-deps, one-shot)
+make cargo-test      # Run cargo test (no-deps, one-shot)
+make py-install      # Install fullmag-py inside dev container
+make py-test         # Install and run Python tests inside dev container
+make repo-check      # Run repo consistency checker
+make smoke           # Full smoke: Python install + CLI build + IR smoke
+make control-room    # Start the local API + Next.js control room
+make control-room-stop  # Stop stale control-room processes
+```
+
+---
+
+## FEM GPU runtime (CUDA + MFEM)
+
+The FEM GPU backend uses a dedicated container with CUDA, MFEM, libCEED, hypre, and Rust nightly.
+
+<Warning>
+The FEM GPU backend requires an NVIDIA GPU and the NVIDIA Container Toolkit. CUDA FDM (`double`) is the current verified GPU path; FEM GPU execution is in progress.
+</Warning>
+
+### Build and check the FEM GPU container
+
+```bash
+make fem-gpu-build     # Build the fem-gpu Docker image
+make fem-gpu-check     # Run cargo check with MFEM stack enabled
+make fem-gpu-test      # Run FEM integration tests inside the container
+```
+
+Or with `just`:
+
+```bash
+just build fem-gpu-runtime         # Build the container image
+just build fem-gpu-runtime-host    # Build in container, export host runtime bundle
+just package fullmag               # Assemble host-side staging package
+```
+
+The exported runtime bundle lands under `.fullmag/runtimes/` and the host package under `.fullmag/dist/`.
+
+### Run with CUDA FDM (inside dev container)
+
+```bash
+cargo run -p fullmag-cli --bin fullmag --features cuda -- examples/exchange_demag_zeeman.py --json
+```
+
+---
+
+## Build from source
+
+To build the CLI directly with Cargo (without Make or Just):
+
+```bash
+# CPU-only build
+CARGO_TARGET_DIR=.fullmag/target cargo +nightly build -p fullmag-cli --release
+
+# CUDA-enabled build (requires nvcc and cmake on PATH)
+FULLMAG_CMAKE=$(which cmake) CUDACXX=$(which nvcc) \
+  CARGO_TARGET_DIR=.fullmag/target \
+  cargo +nightly build -p fullmag-cli --release --features cuda
+
+# FEM GPU build (requires MFEM stack installed)
+FULLMAG_USE_MFEM_STACK=ON \
+  CARGO_TARGET_DIR=.fullmag/target \
+  cargo +nightly build -p fullmag-cli --release --features "cuda fem-gpu"
+```
+
+The resulting binary is at `.fullmag/target/release/fullmag`. The `make install-cli` target additionally copies it to `.fullmag/local/bin/fullmag` and generates a launcher shell wrapper that sets `LD_LIBRARY_PATH` and `FULLMAG_REPO_ROOT` automatically.
+
+### Install Rust nightly
+
+```bash
+rustup install nightly
+rustup default nightly
+```
+
+Or set the channel per-project:
+
+```toml
+# rust-toolchain.toml
+[toolchain]
+channel = "nightly"
+```
+
+---
+
+## Control room (local web UI)
+
+The control room requires Node 22 and pnpm 10. To build and serve the static control room assets:
+
+```bash
+make web-build-static
+```
+
+The static assets are installed to `.fullmag/local/web/`. The `make install-cli-static` target combines the CLI build and the static web build in one step.
+
+Start the control room manually:
+
+```bash
+./scripts/dev-control-room.sh
+# or:
+just control-room
+```
+
+This starts:
+
+- `fullmag-api` on `http://localhost:8080`
+- the Next.js dev server on `http://localhost:3000`

@@ -1,0 +1,144 @@
+---
+title: "Control room"
+description: "The Fullmag local browser control room: what it shows, how to start it, available quantities, and headless operation."
+---
+
+The control room is the primary visual interface for Fullmag simulations. It is a Next.js web application that runs locally at `http://localhost:3000` and consumes live session data from the Fullmag API server at `http://localhost:8080`.
+
+The control room is not a secondary admin panel. It is a first-class authoring companion and live observability tool — the same spirit as amumax/mmDisp-style workflows, but backed by the full Fullmag session and artifact model.
+
+---
+
+## Automatic start
+
+When you run a script normally, the control room starts automatically:
+
+```bash
+fullmag script.py
+```
+
+This:
+
+1. Runs the simulation
+2. Creates or updates the singleton local live workspace under `.fullmag/local-live/`
+3. Starts `fullmag-api` on `http://localhost:8080`
+4. Starts the Next.js control room on `http://localhost:3000`
+5. Opens the browser to `/`
+
+The control room reuses one local web server URL when possible, instead of allocating a new port for every run.
+
+---
+
+## Manual start
+
+You can start the control room independently of a script run, for example to inspect a completed session:
+
+<Steps>
+  <Step title="Start the control room for the current live session">
+    ```bash
+    ./scripts/dev-control-room.sh
+    ```
+    or using the canonical `just` entrypoint:
+    ```bash
+    just control-room
+    ```
+  </Step>
+  <Step title="Start for a specific completed session">
+    ```bash
+    ./scripts/dev-control-room.sh session-1234567890-12345
+    ```
+  </Step>
+  <Step title="Stop stale control room processes">
+    ```bash
+    make control-room-stop
+    ```
+  </Step>
+</Steps>
+
+---
+
+## What the control room shows
+
+The control room is designed around a **quantity selector** first, not around one hardcoded field. The priority order is:
+
+1. Quantity selection
+2. 2D structure view of the selected quantity
+3. 3D magnetization view
+4. Scalar traces
+5. Run status and logs
+6. Artifacts and provenance
+
+### Available quantities
+
+| Quantity | Kind | Notes |
+|---|---|---|
+| `m` | Vector field | Normalized magnetization |
+| `H_ex` | Vector field | Exchange effective field |
+| `H_demag` | Vector field | Demagnetization field |
+| `H_ext` | Vector field | External (Zeeman) field |
+| `H_eff` | Vector field | Total effective field |
+| `E_ex` | Scalar trace | Exchange energy |
+| `E_demag` | Scalar trace | Demagnetization energy |
+| `E_ext` | Scalar trace | Zeeman energy |
+| `E_total` | Scalar trace | Total energy |
+| `max_h_eff` | Scalar trace | Maximum effective field magnitude |
+
+The available set is determined by the energy terms and outputs declared in your Python script.
+
+---
+
+## Singleton workspace
+
+The current local browser flow targets the **singleton workspace** at `/`. Live control data is streamed through `/ws/live/current`. Heavy preview vectors are delivered as binary WebSocket frames instead of inline JSON arrays.
+
+Session state is the canonical stream message: `session_state`. The workspace reflects the most recently launched simulation and persists between runs.
+
+<Note>
+  Longer-term session-oriented routes such as `/runs/<session_id>` are valid architectural targets in the API, but the current local-live entrypoint is the singleton workspace at `/`.
+</Note>
+
+---
+
+## Suppressing the UI
+
+To run without any browser interaction, use the `--headless` flag:
+
+```bash
+fullmag script.py --headless
+```
+
+In headless mode:
+- No browser is launched
+- No web UI is required
+- The API server is optional
+- Artifacts are still written to `.fullmag/local-live/`
+
+This is the canonical mode for HPC, CI, and notebook environments. You can also suppress the UI programmatically:
+
+```python
+import fullmag as fm
+
+result = fm.Simulation(problem, backend="fdm", ui=False).run()
+```
+
+---
+
+## API server endpoints
+
+The control room consumes the `fullmag-api` server at `http://localhost:8080`. Key endpoints:
+
+```text
+GET    /v1/sessions
+GET    /v1/sessions/:id
+GET    /v1/sessions/:id/events        (SSE stream)
+GET    /v1/runs/:id/summary
+GET    /v1/runs/:id/scalars
+GET    /v1/runs/:id/fields/:name/latest
+GET    /v1/runs/:id/artifacts
+```
+
+Heavy field payloads are not pushed through the event stream. Only metadata and availability notices are streamed. Field data is fetched on demand.
+
+<Note>
+  The control room runs on `http://localhost:3000`. The API server runs on `http://localhost:8080`. These two processes are started together by `./scripts/dev-control-room.sh` and by the normal `fullmag script.py` launch path.
+</Note>

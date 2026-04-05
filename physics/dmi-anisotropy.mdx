@@ -1,0 +1,245 @@
+---
+title: "DMI and anisotropy"
+description: "Dzyaloshinskii-Moriya interaction (interfacial and bulk) and magnetocrystalline anisotropy in Fullmag."
+---
+
+<Warning>
+InterfacialDMI, BulkDMI, UniaxialAnisotropy, and CubicAnisotropy are **semantic-only** in the
+current release. They are valid in the Python API and `ProblemIR` and can be serialized and
+planned, but they are not yet numerically executed by any public runner. Attempting to run a
+simulation with these terms will produce a planner error or a semantic-only planning summary,
+not a numerical result.
+</Warning>
+
+## What "semantic-only" means
+
+Fullmag distinguishes three capability tiers for every feature:
+
+| Tier | Meaning |
+|------|---------|
+| **public-executable** | Fully wired: `Simulation.run()` produces numerical results and artifacts. |
+| **internal-reference** | Numerically implemented inside an engine crate as a trusted baseline, but not wired to the public run path. |
+| **semantic-only** | Legal in Python API and `ProblemIR`. Can be authored, serialized, validated, and planned. Not yet numerically executed by any public runner. |
+
+DMI terms and anisotropy are semantic-only. This means you can write a complete, valid Fullmag
+script that includes `fm.InterfacialDMI(D=...)`, and the problem description will be accepted and
+stored in `ProblemIR`, but the planner will not dispatch it to a numerical backend yet.
+
+The physics notes for these terms are frozen and implementation-ready; execution is the deferred
+step.
+
+---
+
+## Interfacial DMI
+
+### Physical model
+
+Interfacial DMI arises at interfaces between magnetic layers and heavy-metal underlayers. The
+broken inversion symmetry at the interface generates an antisymmetric exchange interaction that
+favors chiral spin textures (Néel-type domain walls and skyrmions).
+
+For a film with interface symmetry axis along `+z`, the interfacial DMI energy density is:
+
+```
+w_iDMI = D [ mz ∇·m - (m·∇) mz ]
+```
+
+Expanding in Cartesian components (the `mz ∂z mz` terms cancel):
+
+```
+w_iDMI = D ( mz ∂x mx - mx ∂x mz  +  mz ∂y my - my ∂y mz )
+```
+
+The corresponding effective field is:
+
+```
+H_iDMI = (2D / μ₀ Ms) [ ∇mz - (∇·m) ẑ ]
+```
+
+In component form:
+
+```
+(H_iDMI)_x =  (2D / μ₀ Ms) ∂x mz
+(H_iDMI)_y =  (2D / μ₀ Ms) ∂y mz
+(H_iDMI)_z = -(2D / μ₀ Ms) (∂x mx + ∂y my)
+```
+
+Only in-plane derivatives appear under the present interfacial symmetry convention.
+
+### Natural boundary condition
+
+Interfacial DMI is not only a volume term. Integrating by parts reveals a boundary contribution
+that, combined with exchange, gives the **chiral boundary condition**:
+
+```
+2A ∂ₙm + D [(ẑ × ν) × m] = 0    on ∂Ω
+```
+
+where `ν` is the outward surface normal. This boundary condition is the physical source of chiral
+edge tilts at film boundaries. In FDM it must be realized through ghost cell values that encode
+the combined exchange + DMI natural boundary condition.
+
+### SI units
+
+| Symbol | Meaning | Unit |
+|--------|---------|------|
+| `m` | Reduced magnetization | dimensionless |
+| `Ms` | Saturation magnetization | A/m |
+| `A` | Exchange stiffness | J/m |
+| `D` | Interfacial DMI constant | J/m² |
+| `μ₀` | Vacuum permeability | N/A² |
+| `H_iDMI` | Interfacial DMI field | A/m |
+| `E_iDMI` | Interfacial DMI energy | J |
+
+### Python API
+
+```python
+fm.InterfacialDMI(D=1.5e-3)    # D in J/m²
+```
+
+The first implementation freezes:
+- one scalar `D`
+- one global symmetry axis fixed to `+z`
+- Cartesian FDM stencil with coupled exchange + DMI ghost-cell boundary closure
+
+Future extensions will support an explicit `axis=(0, 0, 1)` parameter and region-dependent `D`.
+
+---
+
+## Bulk DMI
+
+### Physical model
+
+Bulk DMI arises in non-centrosymmetric cubic (B20) materials such as MnSi and FeGe. Unlike
+interfacial DMI, it acts through a fully three-dimensional curl term and favors Bloch-type
+chiral textures (helical spirals, skyrmion lattices).
+
+For isotropic bulk DMI, the continuum energy is:
+
+```
+E_bDMI[m] = D ∫ m · (∇ × m) dV
+```
+
+In Cartesian components:
+
+```
+m · (∇ × m) = mx (∂y mz - ∂z my)
+             + my (∂z mx - ∂x mz)
+             + mz (∂x my - ∂y mx)
+```
+
+The effective field is:
+
+```
+H_bDMI = -(2D / μ₀ Ms) (∇ × m)
+```
+
+In components:
+
+```
+(H_bDMI)_x = -(2D / μ₀ Ms) (∂y mz - ∂z my)
+(H_bDMI)_y = -(2D / μ₀ Ms) (∂z mx - ∂x mz)
+(H_bDMI)_z = -(2D / μ₀ Ms) (∂x my - ∂y mx)
+```
+
+All three spatial directions contribute, unlike interfacial DMI.
+
+### Natural boundary condition
+
+The boundary term from integration by parts gives the **bulk DMI natural boundary condition**:
+
+```
+2A ∂ₙm + D (m × ν) = 0    on ∂Ω
+```
+
+At free surfaces, the FDM ghost cell closure implements this coupled exchange + bulk DMI
+condition. The compact ghost formula is:
+
+```
+m_ghost = m_b - (D Δν / 2A) (m_b × ν)
+```
+
+where `m_b` is the boundary-adjacent cell and `Δν` is the cell size in the normal direction.
+
+### Python API
+
+```python
+fm.BulkDMI(D=1.5e-3)    # D in J/m²
+```
+
+The first implementation targets isotropic cubic bulk DMI only. Lower-symmetry Lifshitz
+invariant families and spatially varying `D` are deferred.
+
+### SI units
+
+| Symbol | Meaning | Unit |
+|--------|---------|------|
+| `D` | Bulk DMI constant | J/m² |
+| `H_bDMI` | Bulk DMI field | A/m |
+| `E_bDMI` | Bulk DMI energy | J |
+
+---
+
+## Anisotropy
+
+Magnetocrystalline anisotropy describes the energy cost of magnetizing a crystal in directions
+that are not the easy axis. Fullmag includes anisotropy parameters in the `ProblemIR` schema
+but does not yet execute them numerically.
+
+### UniaxialAnisotropy
+
+For a uniaxial material with easy axis `û`:
+
+```
+E_u = -Ku1 ∫ (m · û)² dV
+```
+
+The effective field is `H_u = (2 Ku1 / μ₀ Ms) (m · û) û`.
+
+```python
+fm.UniaxialAnisotropy(Ku1=5e5, axis=(0, 0, 1))    # semantic-only
+```
+
+### CubicAnisotropy
+
+For cubic crystals:
+
+```python
+fm.CubicAnisotropy(Kc1=..., Kc2=...)    # semantic-only
+```
+
+Both are semantic-only; the anisotropy constants `Ku1` and the axis `anisU` are carried in the
+material IR but not numerically executed in the current release.
+
+---
+
+## Capability status
+
+| Term | FDM | FEM | Status |
+|------|-----|-----|--------|
+| `InterfacialDMI` | semantic-only | semantic-only | Physics note frozen; FDM implementation planned |
+| `BulkDMI` | semantic-only | semantic-only | Physics note frozen; FDM implementation planned |
+| `UniaxialAnisotropy` | semantic-only | semantic-only | IR parameters defined |
+| `CubicAnisotropy` | semantic-only | semantic-only | Deferred |
+
+---
+
+## Roadmap
+
+<Info>
+The FDM implementation of `InterfacialDMI` is implementation-ready. The physics note
+`0440-fdm-interfacial-dmi.md` freezes the continuum model, the FDM stencil, the
+ghost-cell boundary closure, the face-based discrete energy reference, and the validation
+strategy. Numerical execution is the next step.
+
+`BulkDMI` is covered in `0460-fdm-bulk-dmi.md` with the same level of preparation.
+
+Once FDM execution lands for both terms, FEM semantic support becomes the next milestone.
+</Info>
+
+The planned implementation sequence:
+1. FDM CPU reference for `InterfacialDMI` (stencil + boundary closure + energy kernel)
+2. FDM CPU reference for `BulkDMI` (6-neighbor curl stencil + boundary closure)
+3. CUDA GPU paths for both terms
+4. FEM weak-form realization using MFEM operators
+5. Anisotropy terms alongside the FEM operators

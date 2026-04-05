@@ -1,0 +1,382 @@
+---
+title: 'CLI reference'
+description: 'Reference for the fullmag command-line launcher. Covers script execution, flags, built-in subcommands, build instructions, and PATH setup.'
+---
+
+The `fullmag` CLI is a Rust-hosted launcher. It is the single public entrypoint for running simulations from the terminal, validating scripts, inspecting planned execution, and managing the local control room.
+
+<Info>
+  The CLI is built as `crates/fullmag-cli` and installed to `.fullmag/local/bin/fullmag`. Add it to your PATH before running any commands.
+</Info>
+
+## Installation
+
+<Steps>
+  <Step title="Build and install the launcher">
+
+    Using Make:
+
+    ```bash
+    make install-cli
+    ```
+
+    Using Just (preferred):
+
+    ```bash
+    just build fullmag
+    ```
+
+  </Step>
+  <Step title="Add to PATH">
+
+    ```bash
+    export PATH="$PWD/.fullmag/local/bin:$PATH"
+    ```
+
+    Add this line to your shell profile to make it persistent.
+
+  </Step>
+  <Step title="Verify installation">
+
+    ```bash
+    fullmag --help
+    ```
+
+  </Step>
+</Steps>
+
+<Note>
+  For the heavyweight FEM GPU runtime, build the managed container first and export the host-side bundle before running scripts that target the FEM backend:
+
+  ```bash
+  just build fem-gpu-runtime-host
+  just package fullmag
+  ```
+</Note>
+
+---
+
+## Script mode
+
+The primary use of `fullmag` is to execute a Python script:
+
+```bash
+fullmag script.py [options]
+```
+
+Every script invocation creates exactly one session. The launcher spawns a Python helper, loads the script, builds a canonical `ProblemIR`, runs Rust-side validation and planning, then dispatches execution to the resolved backend.
+
+By default, the launcher also starts `fullmag-api` on `http://localhost:8080` and opens the browser control room at `http://localhost:3000`.
+
+### Script mode flags
+
+<ParamField path="script" type="string" required>
+  Path to the Python script to execute. Must be the first positional argument when not using a subcommand.
+</ParamField>
+
+<ParamField path="--backend" type="string" default="auto">
+  Requested discretisation backend. The planner resolves `auto` into a concrete backend based on the problem definition.
+
+  | Value | Description |
+  |---|---|
+  | `auto` | Let the planner choose based on the problem |
+  | `fdm` | Finite Difference Method |
+  | `fem` | Finite Element Method (requires MFEM stack) |
+  | `hybrid` | Combined FDM/FEM |
+</ParamField>
+
+<ParamField path="--mode" type="string" default="strict">
+  Execution mode.
+
+  | Value | Description |
+  |---|---|
+  | `strict` | Standard execution; no backend-specific extensions |
+  | `extended` | Allow backend-specific extensions declared in the script |
+  | `hybrid` | Combined strict and extended semantics |
+</ParamField>
+
+<ParamField path="--precision" type="string" default="double">
+  Floating-point precision for the native backend.
+
+  | Value | Description |
+  |---|---|
+  | `double` | 64-bit floating point (default; GPU `double` is the calibration target) |
+  | `single` | 32-bit floating point (GPU `single` is not yet public-qualified) |
+</ParamField>
+
+<ParamField path="--headless" type="boolean" default="false">
+  Suppress the control room bootstrap. The simulation runs without starting `fullmag-api` or the browser. Useful for scripted pipelines, CI, and HPC dispatch.
+</ParamField>
+
+<ParamField path="-i / --interactive" type="boolean" default="false">
+  Keep the CLI session open after the scripted stages finish. Allows additional run or relax commands to be queued from the control room or API while the session remains active.
+</ParamField>
+
+<ParamField path="--json" type="boolean" default="false">
+  Output the plan and final result summary as JSON to stdout instead of formatted text. Useful for tooling and programmatic consumption.
+</ParamField>
+
+<ParamField path="--dev" type="boolean" default="false">
+  Run the Next.js control room in development mode instead of serving the built static files.
+</ParamField>
+
+<ParamField path="--web-port" type="number">
+  Port for the dev control room frontend. If omitted, auto-selects from the range 3000–3010.
+</ParamField>
+
+<ParamField path="--output-dir" type="string">
+  Override the output directory for session artifacts. Defaults to the session workspace under `.fullmag/local-live/history/`.
+</ParamField>
+
+---
+
+## Invocation patterns
+
+<CodeGroup>
+
+```bash Standard run (with control room)
+fullmag examples/exchange_relax.py
+```
+
+```bash Headless run (no browser)
+fullmag examples/exchange_relax.py --headless
+```
+
+```bash Interactive session (keep alive after run)
+fullmag -i examples/exchange_relax.py
+```
+
+```bash JSON output (plan + result to stdout)
+fullmag examples/exchange_relax.py --json
+```
+
+```bash Explicit FDM backend, double precision
+fullmag examples/exchange_relax.py --backend fdm --precision double
+```
+
+```bash FEM backend, headless
+fullmag examples/exchange_relax.py --backend fem --headless
+```
+
+```bash GPU CUDA run (requires CUDA-capable device)
+fullmag examples/exchange_demag_zeeman.py --backend fdm
+```
+
+</CodeGroup>
+
+<Tip>
+  The execution horizon (how long the simulation runs) is derived from the script itself. For time-evolution scripts, set `DEFAULT_UNTIL` in the script. For relaxation studies, Fullmag derives the horizon from the study settings.
+</Tip>
+
+---
+
+## Built-in subcommands
+
+The following subcommands are available alongside script mode.
+
+### `fullmag --help`
+
+Prints usage information and a summary of all flags and subcommands.
+
+```bash
+fullmag --help
+```
+
+---
+
+### `fullmag doctor`
+
+Prints the current status of the Fullmag installation: Python bridge availability, canonical `ProblemIR` support, session artifact backend, and native engine status.
+
+```bash
+fullmag doctor
+```
+
+```text Output
+fullmag status
+- public authoring surface: embedded Python API
+- public local launcher: Rust-hosted `fullmag script.py`
+- Python bridge: spawned helper exporting canonical ProblemIR
+- canonical ProblemIR: typed + validated
+- session artifacts: bootstrap file-based shell
+- reference LLG + exchange engine: CPU/FDM slice
+- CUDA FDM backend: native source present, calibration still in progress
+```
+
+---
+
+### `fullmag reference-exchange-demo`
+
+Runs the built-in reference exchange demo without a Python script. Useful for verifying the native engine is functional after installation.
+
+<ParamField path="--steps" type="number" default="10">
+  Number of LLG-Heun steps to run.
+</ParamField>
+
+<ParamField path="--dt" type="number" default="1e-13">
+  Fixed timestep in seconds.
+</ParamField>
+
+<CodeGroup>
+
+```bash Default demo (10 steps)
+fullmag reference-exchange-demo
+```
+
+```bash Custom steps and timestep
+fullmag reference-exchange-demo --steps 100 --dt 1e-13
+```
+
+</CodeGroup>
+
+```json Output
+{
+  "steps": 10,
+  "dt": 1e-13,
+  "initial_exchange_energy_joules": -1.102e-18,
+  "final_exchange_energy_joules": -1.234e-18,
+  "final_time_seconds": 1e-12,
+  "final_center_magnetization": [0.998, 0.063, 0.0],
+  "max_effective_field_amplitude": 1.45e5,
+  "max_rhs_amplitude": 3.21e10
+}
+```
+
+---
+
+### `fullmag validate-json`
+
+Validates a `ProblemIR` JSON file against the Rust schema. Returns a success message or structured errors.
+
+```bash
+fullmag validate-json path/to/problem_ir.json
+```
+
+```text Output (success)
+IR validation passed for path/to/problem_ir.json
+```
+
+---
+
+### `fullmag plan-json`
+
+Validates and plans a `ProblemIR` JSON file. Prints the resolved execution plan as JSON.
+
+<ParamField path="path" type="string" required>
+  Path to the `ProblemIR` JSON file.
+</ParamField>
+
+<ParamField path="--backend" type="string">
+  Override the requested backend. One of `fdm`, `fem`, `hybrid`, `auto`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Plan with auto backend
+fullmag plan-json problem_ir.json
+```
+
+```bash Plan with explicit FDM
+fullmag plan-json problem_ir.json --backend fdm
+```
+
+</CodeGroup>
+
+---
+
+### `fullmag example-ir`
+
+Prints a bootstrap example `ProblemIR` as JSON. Useful for understanding the canonical IR shape or for constructing test inputs.
+
+```bash
+fullmag example-ir
+```
+
+---
+
+### `fullmag run-json`
+
+Runs a planned `ProblemIR` JSON file directly, bypassing the Python bridge. Intended for debugging and integration testing.
+
+<ParamField path="path" type="string" required>
+  Path to the `ProblemIR` JSON file.
+</ParamField>
+
+<ParamField path="--until" type="number" required>
+  Simulation end time in seconds.
+</ParamField>
+
+<ParamField path="--output-dir" type="string" default="run_output">
+  Directory to write run artifacts.
+</ParamField>
+
+<CodeGroup>
+
+```bash Run JSON IR for 1 ns
+fullmag run-json problem_ir.json --until 1e-9
+```
+
+```bash Run with custom output directory
+fullmag run-json problem_ir.json --until 1e-9 --output-dir ./my_run
+```
+
+</CodeGroup>
+
+```json Output
+{
+  "status": "completed",
+  "total_steps": 10000,
+  "final_energy": -1.23e-18,
+  "final_total_energy": -1.23e-18,
+  "output_dir": "run_output"
+}
+```
+
+---
+
+## Control room commands
+
+To start the control room separately from a simulation run:
+
+```bash
+./scripts/dev-control-room.sh
+```
+
+To attach to a specific completed session:
+
+```bash
+./scripts/dev-control-room.sh session-1743696000-42801
+```
+
+To stop stale control-room processes:
+
+```bash
+make control-room-stop
+```
+
+The control room starts:
+- `fullmag-api` on `http://localhost:8080`
+- The Next.js control room on `http://localhost:3000`
+
+---
+
+## Error handling
+
+The CLI exits with status code `0` on success and non-zero on failure. When `--json` is passed, errors are written as JSON to stderr:
+
+```json
+{
+  "error": "validation failed",
+  "diagnostics": [
+    {
+      "level": "error",
+      "code": "missing_study",
+      "message": "No Study defined in the script. Add a TimeEvolution or Eigenmodes study to the Model."
+    }
+  ]
+}
+```
+
+<Warning>
+  GPU `single` precision (`--precision single`) is implemented in the native CUDA backend but is not yet public-qualified. Use `double` for all production and validation runs.
+</Warning>

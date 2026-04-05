@@ -1,0 +1,490 @@
+---
+title: 'Runs API'
+description: 'Access execution payloads, scalar traces, field snapshots, and artifacts for a run. Also covers compile, validate, and plan endpoints for scripts.'
+---
+
+A **run** is the execution payload associated with a session. It owns the resolved backend and precision, all scalar traces, field frames, the full artifact set, and the provenance bundle. In v1, one session owns one run.
+
+<Info>
+  Base URL: `http://localhost:8080`. Derive `run_id` from the parent session via `GET /v1/sessions/:id`.
+</Info>
+
+<Note>
+  The browser should treat run resources as control-plane products. Prefer run endpoints over direct filesystem reads even when artifact files are locally accessible.
+</Note>
+
+## Run resource
+
+<ResponseField name="run_id" type="string" required>
+  Stable unique identifier for this run.
+</ResponseField>
+
+<ResponseField name="session_id" type="string" required>
+  Identifier of the owning session.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Run status. Mirrors the parent session status for the execution phase.
+</ResponseField>
+
+<ResponseField name="resolved_backend" type="string" required>
+  Backend the planner resolved. One of `fdm`, `fem`, `hybrid`.
+</ResponseField>
+
+<ResponseField name="execution_mode" type="string" required>
+  Execution mode. One of `strict`, `extended`, `hybrid`.
+</ResponseField>
+
+<ResponseField name="execution_precision" type="string" required>
+  Floating-point precision. One of `single`, `double`.
+</ResponseField>
+
+<ResponseField name="metadata" type="object">
+  Provenance and stable metadata written at run completion.
+  <Expandable title="properties">
+    <ResponseField name="problem_id" type="string">
+      Canonical problem identifier derived from `ProblemIR`.
+    </ResponseField>
+    <ResponseField name="source_hash" type="string">
+      Hash of the script source at launch time.
+    </ResponseField>
+    <ResponseField name="plan_hash" type="string">
+      Hash of the execution plan used for this run.
+    </ResponseField>
+    <ResponseField name="solver_revision" type="string">
+      Fullmag build revision string.
+    </ResponseField>
+    <ResponseField name="device_info" type="string">
+      Device description, e.g. `NVIDIA RTX 4090` or `CPU`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="scalars" type="object">
+  Scalar trace summary. Full traces available via `GET /v1/runs/:id/scalars`.
+  <Expandable title="properties">
+    <ResponseField name="total_steps" type="number">
+      Total number of completed solver steps.
+    </ResponseField>
+    <ResponseField name="final_time" type="number">
+      Final simulation time in seconds.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="artifacts" type="object">
+  Artifact index. Keys are artifact family names; values are paths within the run artifact tree.
+</ResponseField>
+
+<ResponseField name="provenance" type="object">
+  Full provenance bundle including problem id, session id, run id, backend, mode, precision, solver revision, device info, source hash, and plan hash.
+</ResponseField>
+
+---
+
+## Run endpoints
+
+### Get execution summary
+
+**`GET /v1/runs/:id/summary`**
+
+Returns the resolved execution summary for the run, including backend, mode, precision, and scalar totals.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Get run summary
+curl http://localhost:8080/v1/runs/run-1743696000-42801/summary
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "run_id": "run-1743696000-42801",
+  "session_id": "session-1743696000-42801",
+  "status": "completed",
+  "resolved_backend": "fdm",
+  "execution_mode": "strict",
+  "execution_precision": "double",
+  "scalars": {
+    "total_steps": 1000,
+    "final_time": 1e-10
+  }
+}
+```
+
+---
+
+### Get metadata and provenance
+
+**`GET /v1/runs/:id/metadata`**
+
+Returns the stable provenance bundle and metadata written at run completion.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Get metadata
+curl http://localhost:8080/v1/runs/run-1743696000-42801/metadata
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "run_id": "run-1743696000-42801",
+  "session_id": "session-1743696000-42801",
+  "problem_id": "exchange_relax_box_fdm",
+  "source_hash": "sha256:a1b2c3d4...",
+  "plan_hash": "sha256:e5f6a7b8...",
+  "solver_revision": "0.4.0-dev+abc1234",
+  "device_info": "CPU",
+  "backend": "fdm",
+  "execution_mode": "strict",
+  "execution_precision": "double"
+}
+```
+
+---
+
+### Get scalar traces
+
+**`GET /v1/runs/:id/scalars`**
+
+Returns the full scalar trace for the run. Each row corresponds to one solver step and includes time, step index, adaptive step size, and all active energy terms.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+<ParamField query="format" type="string" default="json">
+  Response format. One of `json` or `csv`. Use `csv` to download the raw `scalars.csv` artifact.
+</ParamField>
+
+Available scalar columns:
+
+| Column | Description |
+|---|---|
+| `step` | Solver step index |
+| `time` | Simulation time in seconds |
+| `solver_dt` | Timestep used for this step in seconds |
+| `E_ex` | Exchange energy in joules |
+| `E_demag` | Demagnetisation energy in joules (when Demag is active) |
+| `E_zeeman` | Zeeman energy in joules (when Zeeman is active) |
+| `E_total` | Total energy in joules |
+| `max_torque` | Maximum LLG torque amplitude |
+
+<CodeGroup>
+
+```bash Get scalars as JSON
+curl http://localhost:8080/v1/runs/run-1743696000-42801/scalars
+```
+
+```bash Download CSV
+curl "http://localhost:8080/v1/runs/run-1743696000-42801/scalars?format=csv" \
+  -o scalars.csv
+```
+
+</CodeGroup>
+
+```json Response (JSON)
+{
+  "run_id": "run-1743696000-42801",
+  "columns": ["step", "time", "solver_dt", "E_ex", "E_total"],
+  "rows": [
+    [0, 0.0, 1e-13, -1.10e-18, -1.10e-18],
+    [100, 1e-11, 1e-13, -1.15e-18, -1.15e-18],
+    [1000, 1e-10, 1e-13, -1.23e-18, -1.23e-18]
+  ]
+}
+```
+
+---
+
+### Get latest field snapshot
+
+**`GET /v1/runs/:id/fields/:name/latest`**
+
+Returns the most recently written snapshot of the named field quantity.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Field quantity name. Common values: `m`, `H_ex`, `H_demag`, `H_ext`, `H_eff`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Get latest magnetisation snapshot
+curl http://localhost:8080/v1/runs/run-1743696000-42801/fields/m/latest
+```
+
+```bash Get latest exchange field
+curl http://localhost:8080/v1/runs/run-1743696000-42801/fields/H_ex/latest
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "run_id": "run-1743696000-42801",
+  "field": "m",
+  "step": 1000,
+  "time": 1e-10,
+  "grid": [64, 32, 1],
+  "data": [[1.0, 0.0, 0.0], [-0.98, 0.19, 0.0]]
+}
+```
+
+---
+
+### Get field snapshot at step
+
+**`GET /v1/runs/:id/fields/:name`**
+
+Returns the field snapshot at a specific solver step.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+<ParamField path="name" type="string" required>
+  Field quantity name. Common values: `m`, `H_ex`, `H_demag`, `H_ext`, `H_eff`.
+</ParamField>
+
+<ParamField query="step" type="number" required>
+  The solver step index to fetch the snapshot for.
+</ParamField>
+
+<CodeGroup>
+
+```bash Get magnetisation at step 500
+curl "http://localhost:8080/v1/runs/run-1743696000-42801/fields/m?step=500"
+```
+
+```bash Get exchange field at step 100
+curl "http://localhost:8080/v1/runs/run-1743696000-42801/fields/H_ex?step=100"
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "run_id": "run-1743696000-42801",
+  "field": "m",
+  "step": 500,
+  "time": 5e-11,
+  "grid": [64, 32, 1],
+  "data": [[0.99, 0.12, 0.0], [-0.95, 0.31, 0.0]]
+}
+```
+
+---
+
+### List artifacts
+
+**`GET /v1/runs/:id/artifacts`**
+
+Returns the artifact index for the run. Artifacts are organised by family. Direct artifact downloads are available via the path endpoint below.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+Artifact families:
+
+| Family | Description |
+|---|---|
+| `metadata.json` | Provenance bundle |
+| `problem_ir.json` | Canonical `ProblemIR` snapshot |
+| `execution_plan.json` | Execution plan produced by the planner |
+| `scalars.csv` | Full scalar trace in CSV format |
+| `fields/m/` | Magnetisation field snapshots |
+| `fields/H_ex/` | Exchange field snapshots |
+| `logs.txt` | Full solver and launcher log |
+
+<CodeGroup>
+
+```bash List artifacts
+curl http://localhost:8080/v1/runs/run-1743696000-42801/artifacts
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "run_id": "run-1743696000-42801",
+  "artifacts": [
+    { "path": "metadata.json", "size_bytes": 512, "written_at": "2026-04-01T12:01:43Z" },
+    { "path": "problem_ir.json", "size_bytes": 4096, "written_at": "2026-04-01T12:00:03Z" },
+    { "path": "execution_plan.json", "size_bytes": 2048, "written_at": "2026-04-01T12:00:03Z" },
+    { "path": "scalars.csv", "size_bytes": 81920, "written_at": "2026-04-01T12:01:43Z" },
+    { "path": "fields/m/step_0000.json", "size_bytes": 16384, "written_at": "2026-04-01T12:00:04Z" },
+    { "path": "fields/m/step_1000.json", "size_bytes": 16384, "written_at": "2026-04-01T12:01:43Z" },
+    { "path": "logs.txt", "size_bytes": 8192, "written_at": "2026-04-01T12:01:43Z" }
+  ]
+}
+```
+
+---
+
+### Download artifact
+
+**`GET /v1/runs/:id/artifacts/:path`**
+
+Downloads a specific artifact by its path within the run artifact tree.
+
+<ParamField path="id" type="string" required>
+  The `run_id`.
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  Artifact path as returned in the artifact index, e.g. `metadata.json` or `fields/m/step_1000.json`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Download metadata
+curl http://localhost:8080/v1/runs/run-1743696000-42801/artifacts/metadata.json \
+  -o metadata.json
+```
+
+```bash Download scalar CSV
+curl http://localhost:8080/v1/runs/run-1743696000-42801/artifacts/scalars.csv \
+  -o scalars.csv
+```
+
+```bash Download field snapshot
+curl "http://localhost:8080/v1/runs/run-1743696000-42801/artifacts/fields/m/step_1000.json" \
+  -o m_step_1000.json
+```
+
+</CodeGroup>
+
+---
+
+## Script utility endpoints
+
+These endpoints compile, validate, or plan a script without creating a full session. They are useful for editor integrations, pre-flight checks, and debugging.
+
+### Compile script
+
+**`POST /v1/compile/script`**
+
+Parses and compiles the Python script into a `ProblemIR` without running validation or planning.
+
+<ParamField body="script" type="string" required>
+  Python script source code.
+</ParamField>
+
+<CodeGroup>
+
+```bash Compile script
+curl -X POST http://localhost:8080/v1/compile/script \
+  -H "Content-Type: application/json" \
+  -d '{"script": "from fullmag import Model, Study\n# ..."}'
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "ok": true,
+  "problem_ir": { "problem_meta": { "problem_name": "exchange_relax" } }
+}
+```
+
+---
+
+### Validate script
+
+**`POST /v1/validate/script`**
+
+Compiles and runs Rust-side validation on the script. Returns any validation errors or warnings without planning or executing.
+
+<ParamField body="script" type="string" required>
+  Python script source code.
+</ParamField>
+
+<CodeGroup>
+
+```bash Validate script
+curl -X POST http://localhost:8080/v1/validate/script \
+  -H "Content-Type: application/json" \
+  -d '{"script": "from fullmag import Model, Study\n# ..."}'
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "ok": true,
+  "diagnostics": [
+    {
+      "level": "warning",
+      "code": "exchange_only_uniform_state",
+      "message": "Exchange-only configuration with uniform initial magnetisation: initial torque is numerically zero."
+    }
+  ]
+}
+```
+
+---
+
+### Plan script
+
+**`POST /v1/plan/script`**
+
+Compiles, validates, and runs the planner on the script. Returns the full execution plan with resolved backend, device, runtime family, and capability checks.
+
+<ParamField body="script" type="string" required>
+  Python script source code.
+</ParamField>
+
+<ParamField body="backend" type="string" default="auto">
+  Requested backend to pass to the planner. One of `fdm`, `fem`, `hybrid`, `auto`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Plan script
+curl -X POST http://localhost:8080/v1/plan/script \
+  -H "Content-Type: application/json" \
+  -d '{"script": "from fullmag import Model, Study\n# ...", "backend": "fdm"}'
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "ok": true,
+  "plan": {
+    "backend": "fdm",
+    "device": "cpu",
+    "precision": "double",
+    "runtime_family": "cpu-reference",
+    "requires_managed_runtime": false
+  },
+  "diagnostics": []
+}
+```
+
+---
+
+## Error responses
+
+| Status | Meaning |
+|---|---|
+| `400 Bad Request` | Malformed request or script parse error |
+| `404 Not Found` | Run or artifact not found |
+| `409 Conflict` | Run is not in a state that allows the requested operation |
+| `500 Internal Server Error` | Unexpected control-plane error |

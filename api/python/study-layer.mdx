@@ -1,0 +1,413 @@
+---
+title: "Study layer"
+description: "Define what computation to perform: time evolution, energy relaxation, or eigenmode analysis."
+keywords: ["study", "TimeEvolution", "Relaxation", "Eigenmodes", "LLG", "outputs", "SaveField", "SaveScalar"]
+---
+
+The study layer answers the question **what computation are we asking for?** A study object is passed to `Problem(study=...)` and selects both the algorithm and the output observables. The study contains no solver implementation — it is a semantic specification that the planner lowers to a concrete execution plan.
+
+<Columns cols={3}>
+  <Card title="TimeEvolution" icon="clock" href="#timeevolution">
+    LLG dynamics up to a stop time.
+  </Card>
+  <Card title="Relaxation" icon="arrow-down-to-line" href="#relaxation">
+    Energy minimization to equilibrium.
+  </Card>
+  <Card title="Eigenmodes" icon="wave-square" href="#eigenmodes">
+    Spin-wave eigenfrequency analysis.
+  </Card>
+</Columns>
+
+---
+
+## TimeEvolution
+
+Evolve the system under full LLG dynamics until an explicit stop time.
+
+```python
+fm.TimeEvolution(
+    dynamics=fm.LLG(fixed_timestep=1e-13),
+    outputs=[
+        fm.SaveField("m", every=50e-12),
+        fm.SaveScalar("E_total", every=10e-12),
+    ],
+)
+```
+
+<ParamField path="dynamics" type="LLG" required>
+  Dynamics configuration: integrator, timestep, gyromagnetic ratio. See [LLG](#llg).
+</ParamField>
+
+<ParamField path="outputs" type="OutputSpec[]" required>
+  List of output specifications. At least one is required. Accepted types: `SaveField`, `SaveScalar`, `Snapshot`.
+</ParamField>
+
+<Note>
+`TimeEvolution` does not accept a stop time. The stop time is passed to `Simulation.run(until=<seconds>)` at the runtime layer.
+</Note>
+
+---
+
+## Relaxation
+
+Drive the system toward a (meta)stable equilibrium satisfying **m × H_eff ≈ 0** under the constraint |m| = 1.
+
+```python
+fm.Relaxation(
+    algorithm="llg_overdamped",
+    torque_tolerance=5e-2,
+    energy_tolerance=1e-21,
+    max_steps=50_000,
+    dynamics=fm.LLG(fixed_timestep=1e-13),
+    outputs=[
+        fm.SaveField("m", every=100e-12),
+        fm.SaveScalar("E_ex", every=10e-12),
+    ],
+)
+```
+
+<ParamField path="outputs" type="OutputSpec[]" required>
+  List of output specifications. At least one is required.
+</ParamField>
+
+<ParamField path="algorithm" type="string" default="llg_overdamped">
+  Relaxation algorithm. See the table below for options.
+</ParamField>
+
+<ParamField path="torque_tolerance" type="float" default="1e-4">
+  Maximum torque convergence threshold in A/m. Convergence is declared when `max_i |m_i × H_eff,i| ≤ torque_tolerance`.
+</ParamField>
+
+<ParamField path="energy_tolerance" type="float">
+  Optional energy-change convergence threshold in Joules. When set, both torque and energy criteria must be satisfied simultaneously.
+</ParamField>
+
+<ParamField path="max_steps" type="integer" default="50000">
+  Hard cap on iterations. The algorithm stops unconditionally after this many steps regardless of convergence.
+</ParamField>
+
+<ParamField path="dynamics" type="LLG">
+  LLG parameters (damping, gyromagnetic ratio). Used directly by `"llg_overdamped"` and for material parameter specifications in all algorithms. Defaults to `LLG()`.
+</ParamField>
+
+### Relaxation algorithms
+
+| Algorithm | Description |
+|---|---|
+| `"llg_overdamped"` | Damping-only LLG. Precession is disabled during relaxation, matching mumax-style semantics. |
+| `"projected_gradient_bb"` | Projected steepest descent with Barzilai–Borwein step selection on the sphere product manifold. Generally faster than overdamped LLG for smooth landscapes. |
+| `"nonlinear_cg"` | Nonlinear conjugate gradient (Polak–Ribière+) with tangent-space vector transport, periodic restarts every 50 iterations, and Armijo backtracking. Typically fastest for large-scale problems. |
+| `"tangent_plane_implicit"` | Linearly implicit tangent-plane method. FEM only. Not yet executable; reserved for future production use. |
+
+---
+
+## Eigenmodes
+
+<Warning>
+`Eigenmodes` is a semantic study type. It describes eigenmode computations in IR and planning but is not yet numerically executable in the current FDM baseline.
+</Warning>
+
+Compute spin-wave eigenfrequencies and mode profiles by linearizing the LLG around an equilibrium state.
+
+```python
+fm.Eigenmodes(
+    count=20,
+    target="lowest",
+    operator="linearized_llg",
+    outputs=[
+        fm.SaveSpectrum(),
+        fm.SaveMode(indices=[0, 1, 2]),
+    ],
+)
+```
+
+<ParamField path="outputs" type="EigenOutputSpec[]" required>
+  List of eigenmode output specifications. At least one is required. Accepted types: `SaveSpectrum`, `SaveMode`, `SaveDispersion`.
+</ParamField>
+
+<ParamField path="count" type="integer" default="20">
+  Number of eigenmodes to compute. Must be positive.
+</ParamField>
+
+<ParamField path="target" type="string" default="lowest">
+  Eigenvalue target: `"lowest"` finds the lowest-frequency modes; `"nearest"` finds modes nearest to `target_frequency`.
+</ParamField>
+
+<ParamField path="target_frequency" type="float">
+  Target frequency in Hz. Required when `target="nearest"`.
+</ParamField>
+
+<ParamField path="operator" type="string" default="linearized_llg">
+  Linearization operator. Currently only `"linearized_llg"` is supported.
+</ParamField>
+
+<ParamField path="equilibrium_source" type="string" default="provided">
+  Source of the equilibrium state: `"provided"` uses the initial magnetization; `"relax"` runs a relaxation first; `"artifact"` loads from a file specified in `equilibrium_artifact`.
+</ParamField>
+
+<ParamField path="include_demag" type="boolean" default="true">
+  Whether to include demagnetization in the linearized operator.
+</ParamField>
+
+<ParamField path="normalization" type="string" default="unit_l2">
+  Mode normalization: `"unit_l2"` or `"unit_max_amplitude"`.
+</ParamField>
+
+<ParamField path="damping_policy" type="string" default="ignore">
+  Whether to include damping in the eigen-operator: `"ignore"` or `"include"`.
+</ParamField>
+
+<ParamField path="dynamics" type="LLG">
+  LLG parameters for the linearized operator. Defaults to `LLG()`.
+</ParamField>
+
+---
+
+## LLG
+
+Landau–Lifshitz–Gilbert dynamics configuration. Used by both `TimeEvolution` and `Relaxation`.
+
+```python
+fm.LLG()                                     # auto integrator, no fixed timestep
+fm.LLG(integrator="heun", fixed_timestep=1e-13)
+fm.LLG(integrator="rk45", adaptive_timestep=fm.AdaptiveTimestep(atol=1e-6, rtol=1e-3))
+```
+
+<ParamField path="gamma" type="float" default="2.211e5">
+  Gyromagnetic ratio γ in m/(A·s). Positive.
+</ParamField>
+
+<ParamField path="integrator" type="string" default="auto">
+  Time integration method. Supported values:
+
+  | Value | Description |
+  |---|---|
+  | `"auto"` | Planner selects the best integrator for the backend |
+  | `"heun"` | Heun's method (fixed step, second-order) |
+  | `"rk4"` | Classic Runge–Kutta (fixed step, fourth-order) |
+  | `"rk23"` | Bogacki–Shampine 3(2) embedded pair (adaptive) |
+  | `"rk45"` | Dormand–Prince 5(4) embedded pair (adaptive) |
+  | `"abm3"` | Adams–Bashforth–Moulton 3-step (fixed step) |
+
+  Aliases: `"bs23"` → `"rk23"`, `"dp54"` → `"rk45"`.
+</ParamField>
+
+<ParamField path="fixed_timestep" type="float">
+  Fixed integration timestep in seconds. Mutually exclusive with `adaptive_timestep`.
+</ParamField>
+
+<ParamField path="adaptive_timestep" type="AdaptiveTimestep">
+  Adaptive timestep configuration. Requires an adaptive integrator (`"rk23"`, `"rk45"`, or `"auto"`). Mutually exclusive with `fixed_timestep`.
+</ParamField>
+
+### AdaptiveTimestep
+
+Controls for embedded-error adaptive stepping used by `"rk23"` and `"rk45"`.
+
+```python
+fm.AdaptiveTimestep(
+    atol=1e-6,
+    rtol=1e-3,
+    dt_max=1e-12,
+    safety=0.9,
+)
+```
+
+<ParamField path="atol" type="float" default="1e-6">
+  Absolute error tolerance.
+</ParamField>
+
+<ParamField path="rtol" type="float" default="1e-3">
+  Relative error tolerance.
+</ParamField>
+
+<ParamField path="dt_initial" type="float">
+  Initial timestep suggestion in seconds.
+</ParamField>
+
+<ParamField path="dt_min" type="float" default="1e-16">
+  Minimum allowed timestep in seconds.
+</ParamField>
+
+<ParamField path="dt_max" type="float">
+  Maximum allowed timestep in seconds.
+</ParamField>
+
+<ParamField path="safety" type="float" default="0.9">
+  Safety factor applied to the error-based step size estimate. Must be in (0, 1].
+</ParamField>
+
+<ParamField path="growth_limit" type="float" default="2.0">
+  Maximum factor by which the timestep may grow in one step. Must be > 1.
+</ParamField>
+
+<ParamField path="shrink_limit" type="float" default="0.2">
+  Minimum factor by which the timestep may shrink in one step. Must be in (0, 1).
+</ParamField>
+
+<ParamField path="max_spin_rotation" type="float">
+  Optional per-step maximum spin rotation in radians. If set, the step is rejected when any cell's magnetization rotates more than this angle.
+</ParamField>
+
+<ParamField path="norm_tolerance" type="float">
+  Optional renormalization tolerance. Cells whose |m| deviates by more than this value trigger a step rejection.
+</ParamField>
+
+---
+
+## Output types
+
+Output specifications are passed as lists to `TimeEvolution.outputs`, `Relaxation.outputs`, or `Eigenmodes.outputs`.
+
+### SaveField
+
+Save a full vector field at a fixed time interval.
+
+```python
+fm.SaveField("m", every=50e-12)
+fm.SaveField("H_eff", every=100e-12)
+```
+
+<ParamField path="field" type="string" required>
+  Field quantity to save. Supported values: `"m"`, `"H_demag"`, `"H_eff"`, `"H_ex"`, `"H_ext"`, `"H_ant"`, `"H_ani"`, `"H_dmi"`, `"H_mel"`.
+</ParamField>
+
+<ParamField path="every" type="float" required>
+  Save interval in seconds. Must be positive.
+</ParamField>
+
+---
+
+### SaveScalar
+
+Save a scalar observable at a fixed time interval.
+
+```python
+fm.SaveScalar("E_total", every=10e-12)
+fm.SaveScalar("max_h_eff", every=10e-12)
+```
+
+<ParamField path="scalar" type="string" required>
+  Scalar quantity to save. Supported values: `"E_ex"`, `"E_demag"`, `"E_ext"`, `"E_total"`, `"time"`, `"step"`, `"solver_dt"`, `"mx"`, `"my"`, `"mz"`, `"max_h_eff"`, `"max_dm_dt"`.
+</ParamField>
+
+<ParamField path="every" type="float" required>
+  Save interval in seconds. Must be positive.
+</ParamField>
+
+---
+
+### Snapshot
+
+Save a single component of a field at a fixed time interval.
+
+```python
+fm.Snapshot(field="m", component="z", every=10e-12)
+fm.Snapshot(field="m", component="3D", every=50e-12, layer="strip")
+```
+
+<ParamField path="field" type="string" required>
+  Field quantity. Same supported values as `SaveField`.
+</ParamField>
+
+<ParamField path="component" type="string" required>
+  Component to save: `"x"`, `"y"`, `"z"`, or `"3D"` for the full vector.
+</ParamField>
+
+<ParamField path="every" type="float" required>
+  Save interval in seconds. Must be positive.
+</ParamField>
+
+<ParamField path="layer" type="string">
+  Optional layer/region name. When set, the snapshot is limited to that region. `None` means all regions.
+</ParamField>
+
+---
+
+### SaveSpectrum
+
+Save eigenfrequency spectrum data. Used with `Eigenmodes`.
+
+```python
+fm.SaveSpectrum()
+fm.SaveSpectrum(quantity="eigenfrequency")
+```
+
+<ParamField path="quantity" type="string" default="eigenfrequency">
+  Spectral quantity to record.
+</ParamField>
+
+---
+
+### SaveMode
+
+Save spatial mode profiles for selected mode indices. Used with `Eigenmodes`.
+
+```python
+fm.SaveMode(field="mode", indices=[0, 1, 2])
+```
+
+<ParamField path="field" type="string" default="mode">
+  Field name for the mode profiles.
+</ParamField>
+
+<ParamField path="indices" type="integer[]" required>
+  Zero-based mode indices to save. Must be non-empty, non-negative, and unique.
+</ParamField>
+
+---
+
+### SaveDispersion
+
+Save dispersion curve data. Used with `Eigenmodes` when k-space sampling is configured.
+
+```python
+fm.SaveDispersion(name="dispersion")
+```
+
+<ParamField path="name" type="string" default="dispersion">
+  Dataset name for the dispersion curve output.
+</ParamField>
+
+---
+
+## Complete examples
+
+### Time evolution with exchange, demag, and Zeeman
+
+```python
+import fullmag as fm
+
+film  = fm.Box(size=(128e-9, 64e-9, 4e-9), name="film")
+mat   = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+magnet = fm.Ferromagnet(name="film", geometry=film, material=mat, m0=fm.init.random(seed=7))
+
+problem = fm.Problem(
+    name="exchange_demag_zeeman",
+    magnets=[magnet],
+    energy=[fm.Exchange(), fm.Demag(), fm.Zeeman(B=(0.0, 0.0, 0.05))],
+    study=fm.TimeEvolution(
+        dynamics=fm.LLG(fixed_timestep=1e-13),
+        outputs=[
+            fm.SaveField("m", every=50e-12),
+            fm.SaveField("H_demag", every=50e-12),
+            fm.SaveScalar("E_ex", every=10e-12),
+            fm.SaveScalar("E_demag", every=10e-12),
+            fm.SaveScalar("E_total", every=10e-12),
+        ],
+    ),
+    discretization=fm.DiscretizationHints(fdm=fm.FDM(cell=(4e-9, 4e-9, 4e-9))),
+)
+```
+
+### Relaxation
+
+```python
+study = fm.Relaxation(
+    algorithm="projected_gradient_bb",
+    torque_tolerance=1e-4,
+    max_steps=100_000,
+    dynamics=fm.LLG(),
+    outputs=[fm.SaveField("m", every=100e-12)],
+)
+```

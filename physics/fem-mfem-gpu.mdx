@@ -1,0 +1,303 @@
+---
+title: "FEM and MFEM GPU backend"
+description: "The Fullmag FEM backend: MFEM + libCEED + hypre architecture, mesh hierarchy, operator design, and capability status."
+---
+
+The Fullmag FEM backend uses a stack of mature scientific computing libraries:
+
+- **MFEM** — mesh handling, finite element spaces, bilinear and linear forms, and operator composition
+- **libCEED** — matrix-free and partial-assembly operator evaluation on CPUs and GPUs
+- **hypre** — Krylov solvers and algebraic multigrid (AMG) preconditioning for global linear systems
+
+The same continuum physics as FDM applies. Exchange, demag, and Zeeman mean the same physical
+energy terms in both discretizations. Only the numerical realization differs.
+
+<Note>
+The public FEM path currently uses a CPU reference runner at double precision. The full
+MFEM/libCEED/hypre GPU execution path requires building with `FULLMAG_USE_MFEM_STACK=ON` and is
+the in-progress production target.
+</Note>
+
+---
+
+## FEM mesh architecture
+
+Fullmag models FEM meshing on three distinct levels. Collapsing these levels into one anonymous
+mesh blob is an architectural regression.
+
+<Tabs>
+  <Tab title="Universe mesh config">
+    The **Universe mesh config** is the study-level meshing policy for the air or background
+    domain surrounding the magnetic bodies. It defines the computational domain used for demag
+    and controls coarsening away from the magnetic regions.
+
+    Universe is not just another object — it is the solver domain and must remain independently
+    configurable from the magnetic body meshes.
+  </Tab>
+  <Tab title="Per-object mesh config">
+    Each `Ferromagnet` carries its own **per-object mesh config**: an independent meshing policy
+    with its own target element size `hmax` and element order. Users can refine the mesh of body
+    A without implicitly rewriting the authoring contract for body B.
+  </Tab>
+  <Tab title="Final shared-domain mesh">
+    The **final shared-domain solver mesh** is one conforming FEM mesh assembled from the Universe
+    and all magnetic body meshes. This is the mesh the solver actually consumes. Separate authoring
+    controls must not degrade into disconnected solver meshes.
+  </Tab>
+</Tabs>
+
+Viewport visibility, isolate mode, and mesh preview scope are rendering concerns only. They must
+never change solver physics or remove domains from the actual FEM problem.
+
+---
+
+## FEM hints
+
+FEM discretization is controlled through `fm.FEM` hints in `DiscretizationHints`:
+
+```python
+fm.DiscretizationHints(
+    fem=fm.FEM(order=1, hmax=2e-9, mesh="path/to/mesh.json"),
+)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `order` | Finite element polynomial order (1 = linear P1) |
+| `hmax` | Target maximum element size in meters |
+| `mesh` | Path to a prebuilt mesh asset (optional; uses geometry-based meshing if absent) |
+
+The planner consumes these hints to build a `FemPlanIR` with the resolved mesh, FE spaces,
+coefficient fields, and demag realization strategy. FEM-specific details never appear in the
+shared `ProblemIR`.
+
+---
+
+## Exchange in FEM
+
+### Weak form
+
+The exchange energy is:
+
+```
+E_ex[m] = ∫ A |∇m|² dV
+```
+
+Its first variation gives the weak-form exchange field: for all test functions `η` in the FE space,
+
+```
+∫ μ₀ Ms H_ex,h · η dV  =  -2 ∫ A ∇m_h : ∇η dV
+```
+
+In matrix form:
+
+```
+M_{μ₀ Ms} h_ex = -K_A m
+```
+
+where `K_A` is the vector diffusion (stiffness) matrix and `M_{μ₀ Ms}` is the mass matrix
+weighted by `μ₀ Ms`.
+
+### Lumped-mass P1 operator
+
+The current public FEM path recovers the exchange field using a **lumped-mass P1 operator**: the
+consistent mass matrix `M_{μ₀ Ms}` is replaced by its row-sum diagonal approximation, avoiding
+a global linear solve. This is a first-order approximation that is GPU-efficient and sufficient for
+the bootstrap FEM slice.
+
+The long-term target for GPU-first execution is:
+1. apply the vector diffusion operator matrix-free via libCEED,
+2. apply an approximate inverse of the weighted mass operator,
+3. obtain `H_ex` as a nodal FE field.
+
+---
+
+## Demag in FEM
+
+Demagnetization is the most important and most difficult FEM interaction. The FEM demag story
+has two levels:
+
+### Current: bootstrap transfer-grid seam
+
+The current public FEM demag path uses a **transfer-grid seam**:
+
+1. The FEM magnetization field is projected onto an auxiliary regular Cartesian grid.
+2. The Newell tensor FFT convolution (same as FDM) is applied on the regular grid.
+3. The resulting field is transferred back to the FEM mesh.
+
+This path is intentionally explicit. It is described as a bootstrap approximation in run
+provenance and enables FDM-FEM cross-backend parity checks on the same physics without requiring
+a full FEM magnetostatic solver.
+
+### Production target: scalar-potential FEM solve
+
+The production FEM demag realization will solve the magnetostatic scalar potential problem on
+the full magnet + air mesh:
+
+```
+Δu = ∇·M   in D = Ω_m ∪ Ω_air
+```
+
+with an appropriate outer boundary condition. The field recovery is `H_demag = -∇u`.
+
+MFEM owns the mesh and FE spaces. hypre provides the Krylov + AMG solver and preconditioner for
+the scalar Poisson solve. libCEED offloads the partial-assembly operator application to GPUs.
+
+<Warning>
+The MFEM GPU demag path is **in progress**. The current public CPU FEM path uses the bootstrap
+transfer-grid seam. Running FEM demag on GPU requires building the `fem-gpu` managed runtime.
+</Warning>
+
+### Open-boundary demag options
+
+The final FEM demag architecture will support a hierarchy of open-boundary realizations:
+
+| Option | Description | Status |
+|--------|-------------|--------|
+| Bootstrap transfer-grid | FFT convolution via auxiliary grid | Public (CPU) |
+| Air-box scalar potential | Truncated domain with Dirichlet BC | Next target |
+| FEM-BEM coupling | True open-boundary treatment | Future |
+| Transformed/infinite domain | Kelvin transformation or similar | Future |
+
+The choice of demag realization is recorded in run provenance and is an execution-plan property,
+not a shared physics property.
+
+---
+
+## GPU build and runtime
+
+The FEM GPU backend is distributed as a managed runtime container built with the MFEM stack.
+
+### Building the FEM GPU runtime
+
+```bash
+# Build the managed FEM-GPU runtime container
+make fem-gpu-build
+
+# Run FEM-GPU tests inside the container
+make fem-gpu-test
+```
+
+Or using `just` recipes (preferred):
+
+```bash
+just build fem-gpu-runtime-host
+```
+
+The managed runtime requires `FULLMAG_USE_MFEM_STACK=ON` at CMake configuration time. The
+container bundles MFEM, libCEED, and hypre at compatible versions and exports a host-usable
+runtime bundle via the canonical packaging contract.
+
+### Using the FEM backend from Python
+
+```python
+import fullmag as fm
+from pathlib import Path
+
+MESH_PATH = Path("assets/box_40x20x10_coarse.mesh.json")
+
+def build() -> fm.Problem:
+    body = fm.Box(size=(40e-9, 20e-9, 10e-9), name="body")
+    material = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+    magnet = fm.Ferromagnet(
+        name="body",
+        geometry=body,
+        material=material,
+        m0=fm.init.uniform((0.0, 0.0, 1.0)),
+    )
+
+    return fm.Problem(
+        name="fem_example",
+        magnets=[magnet],
+        energy=[
+            fm.Exchange(),
+            fm.Demag(),
+            fm.Zeeman(B=(0.0, 0.0, 0.01)),
+        ],
+        study=fm.TimeEvolution(
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=1e-12),
+                fm.SaveField("H_ex", every=1e-12),
+                fm.SaveField("H_demag", every=1e-12),
+                fm.SaveScalar("E_ex", every=1e-13),
+                fm.SaveScalar("E_demag", every=1e-13),
+                fm.SaveScalar("E_total", every=1e-13),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fem=fm.FEM(order=1, hmax=5e-9, mesh=str(MESH_PATH)),
+        ),
+    )
+
+if __name__ == "__main__":
+    problem = build()
+    result = fm.Simulation(problem, backend="fem").run(until=5e-12)
+    print(f"Status: {result.status}")
+    print(f"Final E_ex:    {result.steps[-1].e_ex:.6e} J")
+    print(f"Final E_demag: {result.steps[-1].e_demag:.6e} J")
+```
+
+Run with:
+
+```bash
+fullmag examples/fem_exchange_demag_zeeman.py --backend fem --headless
+```
+
+---
+
+## Canonical field outputs
+
+The FEM backend publishes the same field names as FDM, regardless of the underlying FE
+representation:
+
+| Output name | Description |
+|-------------|-------------|
+| `m` | Magnetization direction (unit vector field) |
+| `H_ex` | Exchange effective field |
+| `H_demag` | Demagnetizing field |
+| `H_ext` | External (Zeeman) field |
+| `H_eff` | Total effective field |
+| `E_ex` | Exchange energy scalar |
+| `E_demag` | Demagnetization energy scalar |
+| `E_ext` | Zeeman energy scalar |
+| `E_total` | Total energy scalar |
+
+Because FE fields live in function spaces rather than cell arrays, the execution plan specifies
+how output snapshots are realized (nodal DOFs, quadrature samples, or projected Cartesian samples).
+This is part of the scientific contract for cross-backend comparison.
+
+---
+
+## Capability status
+
+| Feature | FDM | FEM | Notes |
+|---------|-----|-----|-------|
+| `Exchange` | public-executable | public-executable | Lumped-mass P1 operator in FEM |
+| `Demag` | public-executable | public-executable | Bootstrap transfer-grid seam in FEM (CPU reference) |
+| `Zeeman` | public-executable | public-executable | B→H conversion in planner |
+| `LLG` (Heun) | public-executable | public-executable | Same Heun stepper in both backends |
+| `Relaxation(llg_overdamped)` | public-executable | public-executable | Shared LLG damping pipeline |
+| `Relaxation(projected_gradient_bb)` | public-executable | planned | FEM support deferred |
+| `Relaxation(nonlinear_cg)` | public-executable | planned | FEM support deferred |
+| Execution precision `double` | public-executable | public-executable | CPU reference precision |
+| Execution precision `single` | public-executable (CUDA) | not yet available | FEM precision policy deferred |
+| FEM GPU demag (MFEM/hypre path) | n/a | in progress | Scalar-potential solve on MFEM/hypre |
+| High-order FEM spaces | n/a | planned | P1 only in current bootstrap path |
+| Adaptive mesh refinement | n/a | planned | Deferred |
+| Eigenmode support | n/a | planned | Operators designed for reuse |
+
+---
+
+## Future GPU architecture
+
+The intended full GPU-capable FEM architecture follows the MFEM/libCEED/hypre stack:
+
+- **MFEM** — mesh, FE spaces, form assembly, operator composition
+- **libCEED** — partial-assembly operator evaluation on GPU; handles diffusion-like operators and gradients without assembling large sparse matrices in host memory
+- **hypre** — AMG-preconditioned Krylov solve for the scalar demag potential; enables GPU-resident linear algebra
+
+Exchange field evaluation is bandwidth-bound (operator-application work). Demag requires a real
+global linear solve and therefore a solver/preconditioner strategy. Zeeman is coefficient
+projection work. The three terms have distinct computational character and distinct MFEM/libCEED/hypre
+roles.

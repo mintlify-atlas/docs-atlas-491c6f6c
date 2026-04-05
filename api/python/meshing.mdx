@@ -1,0 +1,394 @@
+---
+title: "Meshing API"
+description: "Generate, inspect, and export FEM tetrahedral meshes for fullmag geometries."
+keywords: ["meshing", "FEM", "mesh", "gmsh", "generate_mesh", "MeshData", "MeshOptions", "MeshQualityReport", "export_stl"]
+---
+
+The meshing API generates tetrahedral meshes for FEM simulation and provides utilities for quality inspection, geometry export, and size-field control. It wraps Gmsh and requires the optional `meshing` extra.
+
+```bash
+pip install 'fullmag[meshing]'
+```
+
+<Note>
+The meshing extra installs Gmsh (`gmsh>=4.12`). If you only need FDM execution you do not need this extra.
+</Note>
+
+---
+
+## generate_mesh()
+
+Generate a tetrahedral mesh for a geometry using Gmsh.
+
+```python
+import fullmag as fm
+
+mesh = fm.generate_mesh(
+    fm.Cylinder(radius=50e-9, height=20e-9),
+    fm.MeshOptions(hmax=5e-9, size_preset="fine"),
+)
+print(f"Nodes:    {mesh.n_nodes}")
+print(f"Elements: {mesh.n_elements}")
+```
+
+<ParamField path="geometry" type="Geometry" required>
+  Any fullmag geometry object: `Box`, `Cylinder`, `Sphere`, `Ellipsoid`, `Ellipse`, `ImportedGeometry`, or CSG composites.
+</ParamField>
+
+<ParamField path="options" type="MeshOptions">
+  Mesh generation options. Defaults to `MeshOptions()` when not set.
+</ParamField>
+
+**Returns:** [`MeshData`](#meshdata)
+
+---
+
+## MeshOptions
+
+Advanced mesh generation options forwarded to Gmsh.
+
+```python
+fm.MeshOptions(
+    hmax=5e-9,
+    hmin=1e-9,
+    size_preset="fine",
+    compute_quality=True,
+)
+```
+
+<ParamField path="algorithm_2d" type="integer" default="6">
+  Gmsh 2D algorithm. `6` = Frontal-Delaunay (default), `5` = Delaunay, `1` = MeshAdapt.
+</ParamField>
+
+<ParamField path="algorithm_3d" type="integer" default="1">
+  Gmsh 3D algorithm. `1` = Delaunay (default), `4` = Frontal, `10` = HXT.
+</ParamField>
+
+<ParamField path="hmin" type="float">
+  Minimum element size in metres.
+</ParamField>
+
+<ParamField path="calibrate_for" type="string">
+  Named physics calibration preset. Currently supported: `"general_physics"`.
+</ParamField>
+
+<ParamField path="size_preset" type="string">
+  Named size preset. Adjusts growth rate, curvature factor, and narrow-region resolution as a bundle. Supported values: `"coarse"`, `"normal"`, `"fine"`, `"finer"`, `"extra_fine"`.
+</ParamField>
+
+<ParamField path="size_factor" type="float" default="1.0">
+  Global size scale factor. Values less than 1 produce finer meshes.
+</ParamField>
+
+<ParamField path="size_from_curvature" type="integer" default="0">
+  Number of elements per 2π radians of curvature. `0` disables curvature-based sizing.
+</ParamField>
+
+<ParamField path="curvature_factor" type="float">
+  COMSOL-style curvature factor (smaller = finer). Converted internally to Gmsh curvature point density.
+</ParamField>
+
+<ParamField path="growth_rate" type="float">
+  Element size growth rate from surface inward. Smaller values produce more uniform meshes.
+</ParamField>
+
+<ParamField path="narrow_regions" type="integer" default="0">
+  Number of elements across narrow geometric gaps. `0` disables narrow-region resolution.
+</ParamField>
+
+<ParamField path="narrow_region_resolution" type="float">
+  COMSOL-style narrow-region resolution factor (larger = finer).
+</ParamField>
+
+<ParamField path="smoothing_steps" type="integer" default="1">
+  Number of Laplacian smoothing passes after meshing.
+</ParamField>
+
+<ParamField path="optimize" type="string">
+  Post-mesh optimizer: `"Netgen"`, `"HighOrder"`, etc.
+</ParamField>
+
+<ParamField path="optimize_iters" type="integer" default="1">
+  Number of optimizer iterations.
+</ParamField>
+
+<ParamField path="boundary_layer_count" type="integer">
+  Number of prismatic boundary-layer elements. `None` disables boundary layers.
+</ParamField>
+
+<ParamField path="boundary_layer_thickness" type="float">
+  Target first-layer thickness in metres.
+</ParamField>
+
+<ParamField path="boundary_layer_stretching" type="float">
+  Layer growth ratio between successive boundary-layer elements (e.g. `1.2`–`1.5`).
+</ParamField>
+
+<ParamField path="compute_quality" type="boolean" default="false">
+  Whether to compute aggregate mesh quality metrics after generation.
+</ParamField>
+
+<ParamField path="per_element_quality" type="boolean" default="false">
+  Whether to store per-element quality values in addition to aggregate statistics.
+</ParamField>
+
+---
+
+## MeshData
+
+Tetrahedral mesh data returned by `generate_mesh()` and related functions.
+
+```python
+mesh = fm.generate_mesh(geometry, fm.MeshOptions(hmax=5e-9))
+
+# Properties
+mesh.n_nodes          # int: number of nodes
+mesh.n_elements       # int: number of tetrahedral elements
+mesh.n_boundary_faces # int: number of triangular boundary faces
+
+# Arrays (numpy)
+mesh.nodes             # (N, 3) float64 — node coordinates in metres
+mesh.elements          # (M, 4) int32  — node indices for each tetrahedron
+mesh.element_markers   # (M,)   int32  — region marker per element
+mesh.boundary_faces    # (F, 3) int32  — node indices for boundary triangles
+mesh.boundary_markers  # (F,)   int32  — marker per boundary face
+```
+
+<ResponseField name="nodes" type="ndarray[float64, (N, 3)]" required>
+  Node coordinates in metres.
+</ResponseField>
+
+<ResponseField name="elements" type="ndarray[int32, (M, 4)]" required>
+  Tetrahedral connectivity: four node indices per element.
+</ResponseField>
+
+<ResponseField name="element_markers" type="ndarray[int32, (M,)]" required>
+  Physical region marker for each element.
+</ResponseField>
+
+<ResponseField name="boundary_faces" type="ndarray[int32, (F, 3)]" required>
+  Triangular boundary face connectivity.
+</ResponseField>
+
+<ResponseField name="boundary_markers" type="ndarray[int32, (F,)]" required>
+  Physical marker for each boundary face.
+</ResponseField>
+
+<ResponseField name="quality" type="MeshQualityReport">
+  Aggregate quality statistics. `None` unless `MeshOptions(compute_quality=True)`.
+</ResponseField>
+
+### MeshData.save()
+
+Persist the mesh to a file.
+
+```python
+mesh.save("mesh/pillar.npz")   # NumPy compressed archive
+mesh.save("mesh/pillar.json")  # Human-readable JSON
+```
+
+<ParamField path="path" type="string | Path" required>
+  Destination path. `.npz` for compressed NumPy, `.json` for text.
+</ParamField>
+
+### MeshData.export_stl()
+
+Export the surface triangulation as a binary STL file. No extra dependencies required.
+
+```python
+mesh.export_stl("output/surface.stl")
+```
+
+### MeshData.export_vtk()
+
+Export the full tetrahedral mesh as a VTK legacy ASCII file.
+
+```python
+mesh.export_vtk("output/mesh.vtk")
+mesh.export_vtk("output/mesh.vtk", fields={"m": magnetization_array})
+```
+
+---
+
+## MeshQualityReport
+
+Aggregate quality metrics extracted from Gmsh after meshing.
+
+```python
+mesh = fm.generate_mesh(geom, fm.MeshOptions(hmax=5e-9, compute_quality=True))
+q = mesh.quality
+print(f"SICN min:  {q.sicn_min:.4f}")
+print(f"SICN mean: {q.sicn_mean:.4f}")
+```
+
+<ResponseField name="n_elements" type="integer">
+  Total number of elements.
+</ResponseField>
+
+<ResponseField name="sicn_min" type="float">
+  Minimum Signed Inverse Condition Number. Ideal → 1, poor → negative.
+</ResponseField>
+
+<ResponseField name="sicn_mean" type="float">
+  Mean SICN across all elements.
+</ResponseField>
+
+<ResponseField name="sicn_p5" type="float">
+  5th-percentile SICN (worst-case tail quality indicator).
+</ResponseField>
+
+<ResponseField name="gamma_min" type="float">
+  Minimum inscribed/circumscribed ratio. Ideal → 1.
+</ResponseField>
+
+<ResponseField name="gamma_mean" type="float">
+  Mean gamma across all elements.
+</ResponseField>
+
+<ResponseField name="volume_min" type="float">
+  Smallest element volume in m³.
+</ResponseField>
+
+<ResponseField name="volume_max" type="float">
+  Largest element volume in m³.
+</ResponseField>
+
+<ResponseField name="avg_quality" type="float">
+  Global average quality (ICN) reported by Gmsh.
+</ResponseField>
+
+---
+
+## export_stl()
+
+Export a fullmag geometry object directly to an STL file without first building a volumetric mesh.
+
+```python
+fm.export_stl(fm.Cylinder(radius=50e-9, height=20e-9), "output/pillar.stl")
+```
+
+This is also available as `fm.export_geometry_to_stl()`.
+
+<ParamField path="geometry" type="Geometry" required>
+  Geometry to export.
+</ParamField>
+
+<ParamField path="path" type="string | Path" required>
+  Destination `.stl` file path.
+</ParamField>
+
+---
+
+## resolve_mesh_size_controls()
+
+Resolve final Gmsh size-control parameters from a `MeshOptions`, including preset expansion and curvature-point conversion.
+
+```python
+controls = fm.resolve_mesh_size_controls(fm.MeshOptions(size_preset="fine"))
+print(controls["resolved_growth_rate"])
+print(controls["resolved_size_from_curvature"])
+```
+
+<ParamField path="opts" type="MeshOptions" required>
+  Options to resolve.
+</ParamField>
+
+**Returns:** `dict[str, object]` with resolved values for `calibrate_for`, `size_preset`, `curvature_factor`, `narrow_region_resolution`, `resolved_size_from_curvature`, `resolved_narrow_regions`, and `resolved_growth_rate`.
+
+---
+
+## Constants
+
+### MESH_SIZE_PRESETS
+
+```python
+fm.MESH_SIZE_PRESETS
+# ("coarse", "normal", "fine", "finer", "extra_fine")
+```
+
+| Preset | Growth rate | Curvature factor | Narrow-region resolution |
+|---|---|---|---|
+| `"coarse"` | 1.8 | 0.8 | 0.3 |
+| `"normal"` | 1.6 | 0.6 | 0.5 |
+| `"fine"` | 1.5 | 0.5 | 0.6 |
+| `"finer"` | 1.4 | 0.4 | 0.7 |
+| `"extra_fine"` | 1.3 | 0.25 | 0.85 |
+
+### MESH_SIZE_CALIBRATIONS
+
+```python
+fm.MESH_SIZE_CALIBRATIONS
+# ("general_physics",)
+```
+
+---
+
+## Using a mesh with FEM
+
+Pass a pre-built mesh to the FEM hints via the `mesh` parameter, or use `ImportedGeometry` with an NPZ or JSON mesh file.
+
+```python
+import fullmag as fm
+
+# 1. Generate mesh
+geom = fm.Cylinder(radius=50e-9, height=20e-9)
+mesh = fm.generate_mesh(geom, fm.MeshOptions(hmax=4e-9, size_preset="fine"))
+mesh.save("mesh/pillar.npz")
+
+# 2. Reference the pre-built mesh in FEM hints
+mat   = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+magnet = fm.Ferromagnet(name="pillar", geometry=geom, material=mat)
+
+problem = fm.Problem(
+    name="fem_relax",
+    magnets=[magnet],
+    energy=[fm.Exchange(), fm.Demag()],
+    study=fm.Relaxation(
+        algorithm="projected_gradient_bb",
+        torque_tolerance=1e-4,
+        outputs=[fm.SaveField("m", every=100e-12)],
+    ),
+    discretization=fm.DiscretizationHints(
+        fem=fm.FEM(order=1, hmax=4e-9, mesh="mesh/pillar.npz"),
+    ),
+)
+```
+
+<Tip>
+For per-body mesh control, attach a `PerObjectMeshRecipe` directly to the `Ferromagnet.mesh` field instead of using global `FEM` hints.
+</Tip>
+
+---
+
+## Complete example
+
+```python
+import fullmag as fm
+
+# Generate and inspect a mesh
+geom = fm.Ellipsoid(rx=80e-9, ry=40e-9, rz=15e-9)
+opts = fm.MeshOptions(
+    hmax=6e-9,
+    size_preset="fine",
+    compute_quality=True,
+    boundary_layer_count=2,
+    boundary_layer_thickness=1.5e-9,
+)
+mesh = fm.generate_mesh(geom, opts)
+
+print(f"Nodes:          {mesh.n_nodes}")
+print(f"Elements:       {mesh.n_elements}")
+print(f"Boundary faces: {mesh.n_boundary_faces}")
+
+if mesh.quality:
+    q = mesh.quality
+    print(f"SICN min/mean:  {q.sicn_min:.3f} / {q.sicn_mean:.3f}")
+
+# Export for external inspection
+mesh.export_stl("output/ellipsoid_surface.stl")
+mesh.export_vtk("output/ellipsoid_mesh.vtk")
+mesh.save("output/ellipsoid_mesh.npz")
+
+# Also export the raw geometry surface
+fm.export_stl(geom, "output/ellipsoid_geom.stl")
+```

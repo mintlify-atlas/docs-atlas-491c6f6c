@@ -1,0 +1,130 @@
+---
+title: "Introduction"
+description: "Fullmag is a micromagnetics simulation platform built around one contract: the shared interface describes a physical problem, not a numerical mesh layout."
+---
+
+## What is Fullmag?
+
+Fullmag is a micromagnetics platform that lets you describe a physical problem — geometry, materials, energy terms, dynamics, and outputs — without specifying how that problem maps onto a solver grid or mesh.
+
+The canonical scripting surface is an embedded, declarative Python DSL. You write ordinary Python scripts or notebooks; those objects serialize into a canonical `ProblemIR` that the Rust control plane validates, normalizes, and lowers into backend-specific execution plans.
+
+The intended product experience is a single application:
+
+- one public launcher: `fullmag script.py`
+- one local control room in the browser
+- managed compute runtimes underneath
+
+For lightweight FDM paths this means bundled binaries. For GPU-accelerated FEM paths — built on MFEM, libCEED, and hypre — the canonical approach is a managed runtime container, while the user-facing interface remains identical.
+
+For HPC environments, the primary assumption is external dispatch: a cluster scheduler places one task on one node, and the node-local command is still simply `fullmag task.py`.
+
+## The core contract
+
+> The shared interface describes a physical problem, not a numerical mesh layout.
+
+Users express:
+
+- **Geometry** — `Box`, `Cylinder`, `Sphere`, `Ellipsoid`, imported meshes, and boolean operations (`Union`, `Intersection`, `Difference`)
+- **Materials** — saturation magnetization `Ms`, exchange stiffness `A`, damping `alpha`, and optional anisotropy, DMI, and magnetostrictive laws
+- **Magnets** — `Ferromagnet` objects binding a geometry, material, and initial magnetization state
+- **Energy terms** — `Exchange`, `Demag`, `Zeeman`, `InterfacialDMI`, `BulkDMI`, `UniaxialAnisotropy`, `CubicAnisotropy`
+- **Study** — `TimeEvolution` or `Relaxation` with `LLG` dynamics and output schedules
+- **Discretization hints** — `FDM(cell=...)`, `FEM(...)`, or `Hybrid(...)` as optional tuning
+
+None of these expose grid indices, raw GPU arrays, MFEM objects, or C ABI details.
+
+## Current executable physics
+
+The currently verified public-executable physics slice is:
+
+| Component | Status |
+|-----------|--------|
+| `Box` geometry | Executable |
+| `Exchange` energy | Executable |
+| `Demag` (FDM) | Executable |
+| `Zeeman` (uniform field) | Executable |
+| `TimeEvolution` with LLG-Heun integrator | Executable |
+| `Relaxation` with overdamped LLG | Executable |
+| FDM backend, CPU reference (`double`) | Executable |
+| CUDA FDM (`double`) | Executable |
+| CUDA FDM (`single`) | Implemented, not yet public-qualified |
+
+<Note>
+FEM execution via MFEM + libCEED + hypre is in progress and available through the `fem-gpu` container profile. It is not yet the default execution path.
+</Note>
+
+## Four user surfaces
+
+Fullmag exposes one application through four complementary surfaces.
+
+**Python authoring** is the only canonical public scripting artifact. Scripts and notebooks build a declarative problem graph that serializes to `ProblemIR`. The UI can also author simulations and must emit an equivalent Python representation — there is no separate UI-only simulation schema.
+
+**CLI launcher** — `fullmag script.py` is the Rust-hosted local entry point. It spawns a Python helper in the active environment, validates and plans the IR, boots a session, and optionally opens the browser.
+
+**Browser control room** — a Next.js application at `http://localhost:3000`. It is a first-class authoring companion and live observability surface, not a secondary admin panel. Live vector fields are streamed as binary WebSocket frames for efficiency. The current local live UI targets the singleton workspace at `/` using `session_state` as the canonical stream message.
+
+**Native compute backends** — FDM (CPU and CUDA) and FEM (MFEM/libCEED/hypre) runtimes behind stable C ABI boundaries. Backend selection is explicit in the problem definition and resolved by the Rust planner. Managed runtimes are acceptable for heavy backends; the launcher still presents as one application.
+
+## Architecture overview
+
+```text
+Python script / notebook
+        |
+        v
+fullmag script.py  (Rust host)
+        |
+        +--> Python helper -> fullmag DSL -> ProblemIR
+        |
+        v
+Rust: validation + normalization + planning + session bootstrap
+        |               |               |
+        v               v               v
+     FDM plan       FEM plan       Hybrid plan
+        |               |               |
+        v               v               v
+  CUDA/C++ core   MFEM/libCEED    coupling runtime
+```
+
+The Rust control plane owns validation, capability checks, planning, session lifecycle, the HTTP API, artifact provenance, and script-export orchestration. Native compute stays behind C ABI seams. The browser consumes the control-plane API; it does not hold solver semantics.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" href="/quickstart">
+    Install Fullmag and run your first simulation in minutes.
+  </Card>
+  <Card title="Installation" href="/installation">
+    Full installation options: Python package, CLI, Docker dev container, and build from source.
+  </Card>
+</CardGroup>
+
+## Repository layout
+
+| Path | Role |
+|------|------|
+| `packages/fullmag-py` | Public embedded Python DSL and runtime scaffolding |
+| `crates/fullmag-ir` | Typed `ProblemIR`, validation, and planning summaries |
+| `crates/fullmag-plan` | Execution planner: lowers `ProblemIR` into backend-specific plans |
+| `crates/fullmag-runner` | Reference runner: executes planned simulations via native backends |
+| `crates/fullmag-engine` | Reference CPU solver for trusted baseline behavior |
+| `crates/fullmag-cli` | CLI launcher, validation, planning, session bootstrap |
+| `crates/fullmag-api` | Control-plane HTTP API and singleton current-live workspace bridge |
+| `crates/fullmag-py-core` | Private PyO3 bridge (Python/Rust integration) |
+| `apps/web` | Next.js control room |
+| `native/` | Native FDM/FEM/hybrid backend seams behind C ABI |
+| `docs/physics/` | Publication-style physics notes (auto-rendered into the web UI) |
+
+## FEM mesh architecture
+
+For FEM problems, Fullmag maintains three distinct semantic layers:
+
+1. **Universe mesh config** — meshing policy for the study-level air/domain region
+2. **Per-object mesh config** — independent meshing policy for each ferromagnetic object
+3. **Final shared-domain solver mesh** — one conforming FEM mesh assembled from Universe + objects
+
+Users can inspect and tune the mesh of `Universe` and of each object independently. The final solver mesh is still one shared-domain FEM mesh. UI visibility and isolate mode are rendering concerns only — they never change the physical solver domain or remove domains from the FEM problem.
+
+## Physics-first development
+
+Every new physics or numerics feature requires a publication-style note in `docs/physics/` before implementation begins. Each note covers governing equations, SI units, assumptions, FDM/FEM/GPU interpretations, `ProblemIR` impact, validation strategy, and known limits.
+
+These notes are the single source of truth for physics documentation and are auto-rendered into the web control room without extra writing effort.

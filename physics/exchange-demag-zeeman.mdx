@@ -1,0 +1,311 @@
+---
+title: "Exchange, demag, and Zeeman"
+description: "The three core executable energy terms in Fullmag: Heisenberg exchange, magnetostatic demagnetization, and the Zeeman external field."
+---
+
+Exchange, demagnetization, and the Zeeman external field are the three energy terms that are
+**public-executable** in the current release on both the FDM and FEM backends. Together they cover
+the most important physics for thin-film, nanostructure, and domain-wall simulations.
+
+## Exchange
+
+### Continuum model
+
+The Heisenberg exchange energy penalizes spatial variation of the magnetization:
+
+```
+E_ex[m] = A ∫ |∇m|² dV  =  A ∫ (|∂ₓm|² + |∂ᵧm|² + |∂_z m|²) dV
+```
+
+where `A` is the exchange stiffness in J/m. A uniform magnetization has zero exchange energy; any
+deviation from uniformity costs energy. The corresponding effective field is:
+
+```
+H_ex = (2A / μ₀ Ms) ∇²m        (for spatially uniform A)
+```
+
+For a spatially varying `A(x)`, the full divergence form `(2/μ₀Ms) ∇·(A ∇m)` applies.
+
+The boundary condition at all free surfaces is the natural Neumann condition:
+
+```
+∂ₙm = 0    on ∂Ω
+```
+
+This follows from Brown's variational condition: the exchange flux through a free surface is zero.
+
+### FDM discretization
+
+In FDM, exchange is derived from a **face-based discrete energy**:
+
+```
+E_ex_h = Σ_{f=i|j}  A_f · (S_f / d_f) · |m_j - m_i|²
+```
+
+where `S_f` is the face area and `d_f` is the center-to-center distance across face `f`. For a
+uniform material on a rectangular grid this collapses to the standard second-order central-difference
+six-point Laplacian stencil.
+
+At free boundaries, ghost cells are set equal to the boundary value (`m_ghost = m_boundary`),
+which realizes the zero-flux Neumann condition.
+
+At material interfaces, the face coefficient `A_f` uses the harmonic mean:
+
+```
+A_f = 2 A_i A_j / (A_i + A_j)
+```
+
+This is consistent with diffusive flux continuity across a material jump.
+
+### FEM discretization
+
+In FEM, exchange is assembled as a vector diffusion operator. The weak form reads:
+
+```
+δE_ex[m; η] = 2 ∫ A ∇m : ∇η dV
+```
+
+The exchange field is recovered by solving the weighted mass system:
+
+```
+M_{μ₀ Ms} h_ex = -K_A m
+```
+
+where `K_A` is the stiffness matrix from the diffusion form and `M_{μ₀ Ms}` is the mass matrix
+weighted by `μ₀ Ms`. In the current public FEM path, a **lumped-mass P1 operator** is used,
+which avoids a global linear solve while maintaining first-order accuracy.
+
+### Python API
+
+```python
+fm.Exchange()
+```
+
+No user parameters are required. Exchange stiffness `A` and saturation magnetization `Ms` are
+read from the `Material` assigned to each `Ferromagnet`.
+
+---
+
+## Demagnetization
+
+### Continuum model
+
+The demagnetizing (dipolar) interaction is the magnetostatic self-interaction of the magnetization
+distribution. With no free currents, Maxwell's equations give:
+
+```
+∇ × H_demag = 0
+∇ · B = 0
+B = μ₀ (H_demag + M)
+```
+
+Because the curl vanishes, introduce a scalar potential `u`:
+
+```
+H_demag = -∇u
+```
+
+Substituting into Gauss' law gives the full-space Poisson problem:
+
+```
+Δu = ∇·M   in ℝ³,    u(x) → 0 as |x| → ∞
+```
+
+The demagnetization energy is:
+
+```
+E_demag = (μ₀/2) ∫_ℝ³ |H_demag|² dV  =  -(μ₀/2) ∫_Ω M · H_demag dV
+```
+
+<Note>
+The demagnetizing field is long-range and non-local: every cell in the simulation volume
+influences every other cell through the magnetostatic interaction. This makes demag the
+computationally dominant term at scale.
+</Note>
+
+### FDM discretization: Newell tensor FFT
+
+On a regular Cartesian grid with uniform cell sizes, the demagnetizing field is a convolution:
+
+```
+H_demag,α(r_i) = -Σ_β Σ_j  N_αβ(r_i - r_j) · M_β(r_j)
+```
+
+where `N_αβ` is the **cell-averaged demagnetizing tensor** for rectangular cells. Only six
+components are independent by symmetry: `N_xx`, `N_yy`, `N_zz`, `N_xy`, `N_xz`, `N_yz`.
+
+The kernel is computed from the **Newell analytic formulas** (closed-form integrals of the
+dipolar kernel over a rectangular cell). Fullmag uses the same kernel construction as the Boris
+solver: an 8-point antidifference applied to the scalar base functions `f` and `g`.
+
+Because the kernel is translation-invariant, the convolution is computed with FFT:
+
+<Steps>
+  <Step title="Assemble magnetization">
+    Form `M = Ms · m` on the active magnetic grid.
+  </Step>
+  <Step title="Zero-pad">
+    Pad the magnetization arrays to at least `(2Nx, 2Ny, 2Nz)` to avoid circular-wrap
+    contamination and realize open-boundary magnetostatics.
+  </Step>
+  <Step title="Forward FFT">
+    Apply real-to-complex FFTs to the three magnetization components.
+  </Step>
+  <Step title="Spectral multiply">
+    Multiply by the precomputed Fourier-space demag tensor (3×3 symmetric tensor multiply at
+    each wavevector).
+  </Step>
+  <Step title="Inverse FFT and crop">
+    Transform back to real space and crop to the physical domain.
+  </Step>
+</Steps>
+
+The kernel spectra are precomputed and cached once per `(nx, ny, nz, dx, dy, dz)` geometry.
+
+### FEM discretization: bootstrap transfer-grid seam
+
+In the current public FEM path, demag is realized through a **transfer-grid seam**: the FEM
+magnetization field is projected onto a regular auxiliary grid, the Newell FFT convolution is
+applied, and the resulting field is transferred back to the FEM mesh. This is an explicit
+bootstrap path, not the final FEM magnetostatic operator.
+
+The long-term FEM target is a scalar-potential solve on the full magnet+air mesh using MFEM +
+hypre, or a FEM-BEM coupling for true open-boundary accuracy.
+
+### Multi-body demag
+
+When a simulation contains multiple `Ferromagnet` bodies stacked along the z-axis, Fullmag uses
+a **multilayer convolution** path that evaluates dipolar interactions between layers via the same
+Newell FFT infrastructure. This avoids re-allocating the full padded grid for each body pair.
+
+### Python API
+
+```python
+fm.Demag()
+```
+
+No user parameters. The demag realization (kernel kind, padding policy) is determined by the
+planner and recorded in provenance.
+
+---
+
+## Zeeman (external field)
+
+### Continuum model
+
+The Zeeman energy is the interaction of the magnetization with an externally applied field:
+
+```
+E_ext[m] = -μ₀ ∫ M · H_ext dV  =  -μ₀ ∫ Ms m · H_ext dV
+```
+
+The effective field contribution is simply `H_ext` itself — this is not a differential operator
+and not a PDE solve. It is a sampled or analytic vector field injected into `H_eff`.
+
+### Python API and unit convention
+
+```python
+fm.Zeeman(B=(0.0, 0.0, 0.1))
+```
+
+The public API accepts the applied field as a magnetic flux density `B` in tesla (T). The planner
+normalizes this to the field `H_ext` used by the solver:
+
+```
+H_ext = B / μ₀        (in A/m)
+```
+
+This conversion is recorded in run provenance. A future API cleanup will prefer an explicit `H=`
+surface or a unit-tagged field object.
+
+---
+
+## Complete example
+
+The following example runs an FDM simulation with all three energy terms active:
+
+```python
+import fullmag as fm
+
+def build() -> fm.Problem:
+    film = fm.Box(size=(128e-9, 64e-9, 4e-9), name="film")
+    mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+    magnet = fm.Ferromagnet(
+        name="film",
+        geometry=film,
+        material=mat,
+        m0=fm.init.random(seed=7),
+    )
+
+    return fm.Problem(
+        name="exchange_demag_zeeman",
+        magnets=[magnet],
+        energy=[
+            fm.Exchange(),
+            fm.Demag(),
+            fm.Zeeman(B=(0.0, 0.0, 0.05)),
+        ],
+        study=fm.TimeEvolution(
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=50e-12),
+                fm.SaveField("H_ex", every=50e-12),
+                fm.SaveField("H_demag", every=50e-12),
+                fm.SaveField("H_ext", every=50e-12),
+                fm.SaveField("H_eff", every=50e-12),
+                fm.SaveScalar("E_ex", every=10e-12),
+                fm.SaveScalar("E_demag", every=10e-12),
+                fm.SaveScalar("E_ext", every=10e-12),
+                fm.SaveScalar("E_total", every=10e-12),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fdm=fm.FDM(cell=(4e-9, 4e-9, 4e-9)),
+        ),
+    )
+
+if __name__ == "__main__":
+    problem = build()
+    result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+    print(f"Status: {result.status}")
+    if result.steps:
+        final = result.steps[-1]
+        print(f"Final E_ex:    {final.e_ex:.6e} J")
+        print(f"Final E_demag: {final.e_demag:.6e} J")
+        print(f"Final E_ext:   {final.e_ext:.6e} J")
+        print(f"Final E_total: {final.e_total:.6e} J")
+```
+
+Run with:
+
+```bash
+fullmag examples/exchange_demag_zeeman.py
+```
+
+---
+
+## SI units reference
+
+| Symbol | Meaning | Unit |
+|--------|---------|------|
+| `m` | Reduced magnetization | dimensionless |
+| `M` | Magnetization density | A/m |
+| `Ms` | Saturation magnetization | A/m |
+| `A` | Exchange stiffness | J/m |
+| `μ₀` | Vacuum permeability | N/A² |
+| `H_ex` | Exchange field | A/m |
+| `H_demag` | Demagnetizing field | A/m |
+| `H_ext` | External (Zeeman) field | A/m |
+| `u` | Magnetic scalar potential | A |
+| `E_ex` | Exchange energy | J |
+| `E_demag` | Demagnetization energy | J |
+| `E_ext` | Zeeman energy | J |
+| `B` | Applied flux density (API input) | T |
+
+## Capability status
+
+| Energy term | FDM | FEM | Notes |
+|-------------|-----|-----|-------|
+| `Exchange` | public-executable | public-executable | CPU 6-point stencil; lumped-mass P1 FEM |
+| `Demag` | public-executable | public-executable | Newell tensor FFT; bootstrap transfer-grid seam for FEM |
+| `Zeeman` | public-executable | public-executable | Planner converts B→H for both backends |

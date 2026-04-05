@@ -1,97 +1,85 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Fullmag"
+description: "A micromagnetics simulation platform with an embedded Python DSL, Rust control plane, and GPU/FEM backends."
 ---
 
-## Setting up
+Fullmag lets you define physical micromagnetic problems in Python and execute them through FDM or FEM backends — on CPU or GPU — with a live browser control room and full artifact provenance.
 
-Get your documentation site up and running in minutes.
+The contract is simple: you describe a physical problem, not a numerical mesh layout. The Rust-hosted `fullmag` launcher handles validation, planning, backend dispatch, and live observability.
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first micromagnetic simulation in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Installation" icon="download" href="/installation">
+    Set up the Python DSL, Rust CLI, and dev environment.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Architecture" icon="diagram-project" href="/concepts/architecture">
+    Understand how Python, Rust, and native backends fit together.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="Python DSL" icon="python" href="/api/python/model-layer">
+    Explore the full public Python API surface.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you can do today
 
-Everything you need to create world-class documentation.
+The current public-executable slice covers:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+- **Box geometry** with Exchange, Demag, and Zeeman energy terms
+- **LLG time evolution** with the Heun integrator
+- **Relaxation** with overdamped LLG, projected-gradient BB, or nonlinear CG
+- **FDM backend** on CPU (double precision reference) and CUDA GPU (single and double)
+- **FEM backend** on CPU reference (MFEM-based, GPU path in progress)
 
-## Need inspiration?
+```python exchange_relax.py
+import fullmag as fm
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+strip = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+magnet = fm.Ferromagnet(name="strip", geometry=strip, material=mat, m0=fm.init.random(seed=42))
+
+problem = fm.Problem(
+    name="exchange_relax",
+    magnets=[magnet],
+    energy=[fm.Exchange()],
+    study=fm.Relaxation(
+        algorithm="llg_overdamped",
+        torque_tolerance=5e-2,
+        dynamics=fm.LLG(fixed_timestep=1e-13),
+        outputs=[fm.SaveField("m", every=100e-12), fm.SaveScalar("E_ex", every=10e-12)],
+    ),
+    discretization=fm.DiscretizationHints(fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9))),
+)
+
+fm.Simulation(problem, backend="fdm", precision="double").run()
+```
+
+Then launch it:
+
+```bash
+fullmag exchange_relax.py
+```
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Problem IR" icon="cube" href="/concepts/problem-ir">
+    Learn how Python objects serialize into the canonical intermediate representation.
+  </Card>
+  <Card title="Backends and precision" icon="microchip" href="/guides/backends-and-precision">
+    Choose between FDM, FEM, CPU, and GPU execution paths.
+  </Card>
+  <Card title="Control room" icon="display" href="/guides/control-room">
+    Monitor live simulations in the browser with WebSocket field visualization.
+  </Card>
+  <Card title="HPC execution" icon="server" href="/guides/hpc-execution">
+    Run headless simulations on clusters via external dispatch systems.
+  </Card>
+  <Card title="REST API" icon="brackets-curly" href="/api/rest/sessions">
+    Integrate with the local control-plane HTTP API for sessions and runs.
+  </Card>
+  <Card title="Physics reference" icon="atom" href="/physics/overview">
+    Publication-style notes on every implemented physics term.
+  </Card>
+</CardGroup>

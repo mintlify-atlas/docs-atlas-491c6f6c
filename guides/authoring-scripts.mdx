@@ -1,0 +1,225 @@
+---
+title: "Authoring scripts"
+description: "How to describe micromagnetic problems using the Fullmag embedded Python DSL, from model construction to artifacts."
+---
+
+The public authoring surface for Fullmag is an embedded, declarative Python DSL in `packages/fullmag-py`. You write ordinary Python scripts or notebooks, but the objects you construct serialize into a canonical `ProblemIR` that Rust validates, normalizes, and lowers into backend-specific execution plans.
+
+## Three-layer structure
+
+Every Fullmag script is organized around three conceptual layers.
+
+**Model layer — what physical system exists?**
+
+Describes geometry, materials, and energy terms. No runtime or backend details belong here.
+
+```python
+fm.Box, fm.Cylinder, fm.ImportedGeometry
+fm.Material
+fm.Ferromagnet
+fm.Exchange, fm.Demag, fm.Zeeman, fm.InterfacialDMI
+```
+
+**Study layer — what computation are we asking for?**
+
+Separates the requested computation from the physical model. This is necessary because Fullmag targets more than LLG time integration — future FEM eigenproblems and static solves use the same model layer with a different study.
+
+```python
+fm.TimeEvolution
+fm.Relaxation
+fm.Eigenmodes      # future
+fm.StaticSolve     # future
+```
+
+**Runtime layer — how do we execute it?**
+
+```python
+fm.Simulation(
+    problem,
+    backend="fdm" | "fem" | "auto",
+    mode="strict" | "extended" | "hybrid",
+    precision="single" | "double",
+    ui=True | False | "auto",
+)
+```
+
+This split keeps the model as physical truth, the study as requested computation, and the runtime as execution policy — three things that must never be conflated.
+
+---
+
+## Complete working example
+
+The following script is `examples/exchange_relax.py`, the canonical Phase 1 executable example. It demonstrates a `Box + Exchange + Relaxation(LLG-overdamped) + FDM` problem.
+
+```python
+"""Canonical executable example: exchange-only relaxation on a Box geometry.
+
+This is the simplest public-executable problem in Phase 1:
+- Box geometry (direct grid derivation, no voxelizer needed)
+- Exchange energy only
+- LLG with Heun integrator
+- Random initial magnetization (non-trivial exchange field)
+- FDM backend in strict mode
+
+Usage:
+    fullmag examples/exchange_relax.py
+    python examples/exchange_relax.py
+
+When fullmag-py-core is installed (maturin develop), this runs
+end-to-end through the Rust reference engine and writes artifacts.
+"""
+
+import fullmag as fm
+
+
+def build() -> fm.Problem:
+    strip = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+    mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+    magnet = fm.Ferromagnet(
+        name="strip",
+        geometry=strip,
+        material=mat,
+        m0=fm.init.random(seed=42),
+    )
+
+    return fm.Problem(
+        name="exchange_relax",
+        magnets=[magnet],
+        energy=[fm.Exchange()],
+        study=fm.Relaxation(
+            algorithm="llg_overdamped",
+            torque_tolerance=5e-2,
+            energy_tolerance=1e-21,
+            max_steps=50_000,
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=100e-12),
+                fm.SaveField("H_ex", every=100e-12),
+                fm.SaveScalar("E_ex", every=10e-12),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9)),
+        ),
+    )
+
+
+if __name__ == "__main__":
+    problem = build()
+    result = fm.Simulation(problem, backend="fdm").run(until=2e-9)
+
+    print(f"Status: {result.status}")
+    if result.steps:
+        print(f"Total steps: {len(result.steps)}")
+        print(f"Final E_ex: {result.steps[-1].e_ex:.6e} J")
+        print(f"Final time: {result.steps[-1].time:.6e} s")
+    if result.output_dir:
+        print(f"Artifacts written to: {result.output_dir}")
+    for note in result.notes:
+        print(f"  Note: {note}")
+else:
+    # When loaded as a module (e.g. by the script loader), just expose the problem
+    problem = build()
+```
+
+---
+
+## Running scripts
+
+<Steps>
+  <Step title="Standard run with browser UI">
+    ```bash
+    fullmag script.py
+    ```
+    Runs the simulation, starts the local API server on `localhost:8080`, and opens the control room in the browser at `localhost:3000`.
+  </Step>
+  <Step title="Headless run">
+    ```bash
+    fullmag script.py --headless
+    ```
+    Same plan and execution contract; no browser is launched. Artifacts are still written. This is the canonical mode for HPC and CI.
+  </Step>
+  <Step title="Interactive mode">
+    ```bash
+    fullmag -i script.py
+    ```
+    Keeps the CLI open after the run completes so you can inspect the session interactively.
+  </Step>
+</Steps>
+
+---
+
+## Using fullmag as a Python library
+
+Scripts can also be driven directly from Python without the CLI launcher. This is the canonical notebook and library mode.
+
+```python
+import fullmag as fm
+
+problem = build_problem()
+result = fm.Simulation(problem, backend="fdm").run(until=2e-9)
+
+print(result.status)       # "completed" | "not-executable" | "planned"
+print(result.backend)      # BackendTarget.FDM
+print(result.output_dir)   # path to artifact directory
+for step in result.steps:
+    print(step.time, step.e_ex)
+```
+
+`Simulation.run()` returns a `Result` object with `status`, `backend`, `mode`, `precision`, `notes`, `steps`, `final_magnetization`, and `output_dir`. See [Runtime layer](/api/python/runtime-layer) for the full field reference.
+
+<Note>
+  To run without the CLI browser bootstrap, call `Simulation.run()` directly from Python. Use `fullmag script.py --headless` from the terminal if you want headless execution while keeping the Rust session manager active.
+</Note>
+
+---
+
+## Problem structure reference
+
+`fm.Problem` is the root object that lowers to `ProblemIR`:
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `str` | Human-readable identifier, used in artifact paths |
+| `magnets` | `list[Ferromagnet]` | Ferromagnetic bodies in the problem |
+| `energy` | `list[...]` | Energy terms: `Exchange`, `Demag`, `Zeeman`, etc. |
+| `study` | `TimeEvolution \| Relaxation \| ...` | Requested computation |
+| `discretization` | `DiscretizationHints` | Backend-specific hints for grid or mesh |
+
+`DiscretizationHints` holds backend hint objects independently:
+
+```python
+fm.DiscretizationHints(
+    fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9)),
+    fem=fm.FEM(mesh=None, hmax=2e-9, order=1),
+)
+```
+
+These hints stay backend-specific and are only interpreted when the corresponding backend is selected.
+
+---
+
+## Output artifacts
+
+Artifacts are written under `.fullmag/local-live/` by default. Every run produces:
+
+```text
+.fullmag/
+└── local-live/
+    └── <session_id>/
+        ├── metadata.json
+        ├── problem_ir.json
+        ├── execution_plan.json
+        ├── scalars.csv
+        ├── fields/
+        │   ├── m/
+        │   ├── H_ex/
+        │   └── H_demag/
+        └── logs.txt
+```
+
+Every artifact set carries problem id, session id, run id, backend, mode, precision, solver revision, device info, source hash, and plan hash.
+
+<Tip>
+  Use `fm.SaveField("m", every=50e-12)` and `fm.SaveScalar("E_ex", every=10e-12)` inside the `outputs=` list of your study to control what gets written and at what interval (in seconds of simulated time).
+</Tip>

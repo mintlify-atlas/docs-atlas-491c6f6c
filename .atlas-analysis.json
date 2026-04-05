@@ -1,0 +1,117 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Fullmag",
+  "projectDescription": "A micromagnetics simulation platform with an embedded Python DSL, Rust control plane, and GPU/FEM backends for defining and executing physical magnetic problems.",
+  "theme": "aspen",
+  "primaryColor": "#1A56DB",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/problem-ir",
+              "concepts/execution-model",
+              "concepts/capability-tiers"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/authoring-scripts",
+              "guides/backends-and-precision",
+              "guides/control-room",
+              "guides/hpc-execution",
+              "guides/meshing"
+            ]
+          },
+          {
+            "group": "Physics Reference",
+            "pages": [
+              "physics/overview",
+              "physics/llg-dynamics",
+              "physics/exchange-demag-zeeman",
+              "physics/relaxation",
+              "physics/dmi-anisotropy",
+              "physics/fem-mfem-gpu"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Python DSL",
+            "pages": [
+              "api/python/model-layer",
+              "api/python/study-layer",
+              "api/python/runtime-layer",
+              "api/python/meshing",
+              "api/python/initialization"
+            ]
+          },
+          {
+            "group": "REST API",
+            "pages": [
+              "api/rest/sessions",
+              "api/rest/runs",
+              "api/rest/live-control"
+            ]
+          },
+          {
+            "group": "CLI Reference",
+            "pages": [
+              "api/cli/commands"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Embedded Python DSL for authoring micromagnetic simulations",
+    "Rust-hosted CLI launcher with Python helper bridge",
+    "Canonical ProblemIR intermediate representation validated by Rust",
+    "FDM and FEM backends with CPU and CUDA GPU support",
+    "Live browser control room with WebSocket field visualization",
+    "Session-oriented execution model with artifact and provenance tracking",
+    "Physics-first documentation enforced as a hard CI gate",
+    "HPC-ready headless execution via external dispatch (e.g., Microlab/Slurm)",
+    "Capability matrix with explicit semantic-only / internal-reference / public-executable tiers",
+    "Managed backend runtimes for heavyweight FEM/GPU stacks (MFEM + libCEED + hypre)"
+  ],
+  "publicApiSurface": [
+    "fm.Problem — top-level problem description",
+    "fm.Box, fm.Cylinder, fm.Sphere, fm.Ellipsoid — geometry primitives",
+    "fm.Material — material constants (Ms, A, alpha)",
+    "fm.Ferromagnet — magnetic body with geometry, material, and m0",
+    "fm.Exchange, fm.Demag, fm.Zeeman, fm.InterfacialDMI, fm.BulkDMI — energy terms",
+    "fm.TimeEvolution, fm.Relaxation, fm.Eigenmodes — study types",
+    "fm.LLG — dynamics specification with integrator and timestep",
+    "fm.FDM, fm.FEM, fm.Hybrid — discretization hints",
+    "fm.Simulation(problem, backend, mode, precision, ui) — runtime entry point",
+    "fm.Simulation.plan() — returns capability and planning summary",
+    "fm.Simulation.run() — returns Result with status, artifacts, scalar traces",
+    "fm.SaveField, fm.SaveScalar — output specification",
+    "fm.init.random, fm.init.uniform, fm.init.texture — magnetization initializers",
+    "fullmag script.py — CLI launcher (Rust-hosted)",
+    "GET /v1/sessions, GET /v1/sessions/:id — session endpoints",
+    "GET /v1/runs/:id/summary, GET /v1/runs/:id/scalars, GET /v1/runs/:id/fields/:name — run endpoints",
+    "GET /v1/sessions/:id/events — SSE event stream",
+    "GET /ws/live/current — binary WebSocket live preview"
+  ]
+}

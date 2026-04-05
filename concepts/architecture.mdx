@@ -1,0 +1,151 @@
+---
+title: 'Architecture'
+description: 'How Fullmag is structured: four surfaces, a layered execution chain, and the division of responsibility between Python, Rust, and native backends.'
+keywords: ['architecture', 'layers', 'execution chain', 'python', 'rust', 'backend', 'cli', 'control room']
+---
+
+Fullmag is one application with four user-visible surfaces. Every surface operates on the same physical model. No surface invents its own simulation semantics.
+
+## Four surfaces
+
+<CardGroup cols={2}>
+  <Card title="Python authoring" icon="python">
+    The only public way to describe a simulation problem. Users write ordinary Python scripts or notebooks using the `fullmag` embedded DSL.
+  </Card>
+  <Card title="CLI launcher" icon="terminal">
+    `fullmag script.py` is a Rust-hosted binary. It owns the full execution lifecycle: spawning the Python helper, validation, planning, session management, and artifact writing.
+  </Card>
+  <Card title="Browser control room" icon="monitor">
+    A live and historical observability surface. Not a secondary admin panel — for local simulation work it is the primary visual interface, in the same spirit as amumax/mmDisp-style workflows.
+  </Card>
+  <Card title="Native compute backends" icon="cpu">
+    FDM (C++/CUDA) and FEM (MFEM/libCEED/hypre) execution engines, reached through a stable C ABI boundary. Users never interact with these directly.
+  </Card>
+</CardGroup>
+
+## Execution chain
+
+Every invocation of `fullmag script.py` follows this chain:
+
+```text
+Python script / notebook
+        │
+        ▼
+Rust host  ──  fullmag script.py
+        │
+        ├──▶  spawn Python helper in user environment
+        │           │
+        │           └──▶  fullmag Python package
+        │                   • model DSL
+        │                   • script loader
+        │                   • ProblemIR serialization
+        │
+        ▼
+Rust control plane
+  • validation
+  • normalization
+  • capability checks
+  • planning
+  • session manager
+  • runner dispatch
+  • artifact / provenance
+  • local API server
+        │
+        ├──────────────────────┐
+        ▼                      ▼
+FDM native backend       FEM native backend
+(CUDA / C++)             (MFEM / libCEED / hypre)
+        │
+        └──────── shared artifacts ────────▶ browser control room
+```
+
+The Python helper is spawned in the active user environment, preserving the user's installed packages without requiring embedded CPython in the launcher binary.
+
+## Layer separation
+
+Fullmag separates concerns into five explicit layers, each with a single owner.
+
+<Steps>
+  <Step title="Authoring layer">
+    Python scripts and notebooks. The only public scripting surface. Objects build a declarative problem graph; the graph is then serialized into `ProblemIR`. No grid indices, GPU arrays, or solver internals appear here.
+  </Step>
+  <Step title="IR layer">
+    `ProblemIR` — the canonical, backend-neutral intermediate representation. Rust validates and normalizes it. The IR carries no FEM-only or FDM-only layout details.
+  </Step>
+  <Step title="Planning layer">
+    The Rust planner lowers `ProblemIR` into an `ExecutionPlanIR`. It resolves `auto` backend selection, performs capability checks, and produces the exact backend/device/precision plan that will run.
+  </Step>
+  <Step title="Runtime / session layer">
+    Rust owns the session lifecycle, runner dispatch, event stream, artifact index, and the local API server consumed by the browser. One session per invocation.
+  </Step>
+  <Step title="Native execution layer">
+    FDM and FEM backends execute the plan and write shared artifacts. They are reached through a stable C ABI boundary; the user never sees backend-specific types.
+  </Step>
+</Steps>
+
+## Ownership model
+
+| Concern | Owner |
+|---------|-------|
+| Problem authoring and serialization | Python |
+| Validation, normalization, capability checks | Rust |
+| Planning and backend selection | Rust |
+| Session lifecycle and event streaming | Rust |
+| Local API server | Rust |
+| FDM compute kernels | C++ / CUDA |
+| FEM solve | MFEM / libCEED / hypre |
+| Backend boundary | C ABI |
+| Live observability | Browser (Next.js) |
+
+## Rust as control plane
+
+Rust owns everything between Python serialization and native compute:
+
+- validation of `ProblemIR` against physical and structural rules,
+- normalization of optional fields and defaults,
+- planning: resolving `auto`, checking capability tiers, building `ExecutionPlanIR`,
+- session state machine (`starting → loading_script → validating → planning → running → completed / failed / cancelled`),
+- runner dispatch to native backends via C ABI,
+- artifact and provenance writing,
+- the local REST + SSE API consumed by the browser.
+
+Python retains authoring ownership. The CLI launcher is a Rust binary precisely because Rust must own these responsibilities without being held inside a Python process.
+
+## C ABI as backend boundary
+
+The user never sees CUDA pointers, MFEM objects, raw grid arrays, or FEM-only storage types. Native backends expose a stable C ABI surface to Rust. This boundary makes it possible to ship heavy backends as managed runtime packs without recompiling the launcher.
+
+```text
+Rust control plane
+        │
+        │  stable C ABI
+        ▼
+┌───────────────┐   ┌──────────────────────────┐
+│  FDM backend  │   │       FEM backend         │
+│  (CUDA/C++)   │   │  (MFEM / libCEED / hypre) │
+└───────────────┘   └──────────────────────────┘
+```
+
+## Application packaging
+
+The canonical distribution is one launcher with managed backend runtimes:
+
+- **Bundled in the launcher**: Rust control plane, Python helper bridge, browser assets, CPU reference backends.
+- **Managed runtime packs**: CUDA FDM runtime, MFEM/libCEED/hypre FEM runtime.
+
+The user still runs one command. The launcher selects the appropriate runtime under the hood.
+
+<Note>
+The detailed runtime and packaging contract is in `docs/specs/runtime-distribution-and-managed-backends-v1.md`.
+</Note>
+
+## Learn more
+
+<CardGroup cols={2}>
+  <Card title="Problem IR" href="/concepts/problem-ir" icon="file-json">
+    The canonical intermediate representation that carries backend-neutral problem truth between Python and Rust.
+  </Card>
+  <Card title="Execution model" href="/concepts/execution-model" icon="play">
+    Sessions, lifecycle states, backend targets, precision, and how planning resolves execution intent.
+  </Card>
+</CardGroup>

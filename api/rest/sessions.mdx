@@ -1,0 +1,426 @@
+---
+title: 'Sessions API'
+description: 'Manage simulation sessions. One session is created per fullmag script.py invocation and owns the full lifecycle from validation through execution to artifact writing.'
+---
+
+The session is the top-level runtime execution context. Every local invocation of `fullmag script.py` creates exactly one session. The session owns the lifecycle state, problem summary, plan summary, event stream, artifact index, diagnostics, and cancellation state.
+
+<Info>
+  Base URL: `http://localhost:8080`. The API server starts automatically when you run `fullmag script.py` without `--headless`.
+</Info>
+
+## Session lifecycle
+
+A session moves through the following states in order. Terminal states are `completed`, `failed`, and `cancelled`.
+
+| State | Description |
+|---|---|
+| `starting` | Session record created; launcher context initialising |
+| `loading_script` | Python helper spawned; script being loaded |
+| `validating` | `ProblemIR` validation running in Rust |
+| `planning` | Planner resolving backend, mode, and precision |
+| `running` | Execution active on the resolved backend |
+| `completed` | Run finished successfully; artifacts written |
+| `failed` | Validation, planning, or execution error; diagnostics available |
+| `cancelled` | Cancellation requested and acknowledged |
+
+<Note>
+  A session may fail before reaching `running`. Even a validation or planning failure produces a real session record with diagnostics attached.
+</Note>
+
+## Session resource
+
+<ResponseField name="session_id" type="string" required>
+  Stable unique identifier for this session. Remains constant for the session lifetime.
+</ResponseField>
+
+<ResponseField name="run_id" type="string" required>
+  Identifier for the execution payload associated with this session. In v1, one session owns one run.
+</ResponseField>
+
+<ResponseField name="status" type="string" required>
+  Current lifecycle state. One of `starting`, `loading_script`, `validating`, `planning`, `running`, `completed`, `failed`, `cancelled`.
+</ResponseField>
+
+<ResponseField name="created_at" type="string" required>
+  ISO 8601 timestamp when the session was created.
+</ResponseField>
+
+<ResponseField name="updated_at" type="string" required>
+  ISO 8601 timestamp of the last state transition.
+</ResponseField>
+
+<ResponseField name="problem_name" type="string">
+  Human-readable name derived from the script or `ProblemIR`.
+</ResponseField>
+
+<ResponseField name="script_path" type="string">
+  Absolute path to the script that was passed to `fullmag`. Present when the session was created from a script invocation.
+</ResponseField>
+
+<ResponseField name="requested_backend" type="string">
+  Backend as requested by the user. One of `fdm`, `fem`, `hybrid`, `auto`.
+</ResponseField>
+
+<ResponseField name="resolved_backend" type="string">
+  Backend that the planner actually resolved. Populated after the `planning` state. One of `fdm`, `fem`, `hybrid`.
+</ResponseField>
+
+<ResponseField name="execution_mode" type="string">
+  Execution mode. One of `strict`, `extended`, `hybrid`.
+</ResponseField>
+
+<ResponseField name="execution_precision" type="string">
+  Floating-point precision used by the backend. One of `single`, `double`.
+</ResponseField>
+
+<ResponseField name="problem_summary" type="object">
+  Normalised summary of the physical problem as authored in the Python DSL.
+  <Expandable title="properties">
+    <ResponseField name="geometry" type="string">
+      Geometry description, e.g. `Box`.
+    </ResponseField>
+    <ResponseField name="physics" type="string[]">
+      Active physics terms, e.g. `["Exchange", "Demag", "Zeeman"]`.
+    </ResponseField>
+    <ResponseField name="study" type="string">
+      Study type, e.g. `TimeEvolution(LLG-Heun)`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="plan_summary" type="object">
+  Summary of the execution plan produced by the planner. Populated after the `planning` state.
+  <Expandable title="properties">
+    <ResponseField name="backend" type="string">
+      Resolved backend identifier.
+    </ResponseField>
+    <ResponseField name="device" type="string">
+      Resolved device target, e.g. `cpu`, `cuda`.
+    </ResponseField>
+    <ResponseField name="runtime_family" type="string">
+      Runtime family selected, e.g. `fdm-cuda`, `cpu-reference`.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="diagnostics" type="object[]">
+  List of validation and planning diagnostics. Present even when the session fails before running.
+  <Expandable title="properties">
+    <ResponseField name="level" type="string">
+      Severity level. One of `info`, `warning`, `error`.
+    </ResponseField>
+    <ResponseField name="code" type="string">
+      Machine-readable diagnostic code.
+    </ResponseField>
+    <ResponseField name="message" type="string">
+      Human-readable diagnostic message.
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="latest_artifacts" type="object">
+  Lightweight index of the most recently written artifacts. Keys are artifact family names.
+</ResponseField>
+
+<ResponseField name="cancel_allowed" type="boolean">
+  Whether a cancellation request can be issued for this session in its current state.
+</ResponseField>
+
+---
+
+## Endpoints
+
+### List sessions
+
+<ParamField query="status" type="string">
+  Filter by lifecycle state. One of `starting`, `loading_script`, `validating`, `planning`, `running`, `completed`, `failed`, `cancelled`.
+</ParamField>
+
+<ParamField query="limit" type="number" default="50">
+  Maximum number of sessions to return.
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Pagination offset.
+</ParamField>
+
+**`GET /v1/sessions`**
+
+Returns lightweight session summaries for all known sessions.
+
+<CodeGroup>
+
+```bash List all sessions
+curl http://localhost:8080/v1/sessions
+```
+
+```bash Filter by status
+curl "http://localhost:8080/v1/sessions?status=running"
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "sessions": [
+    {
+      "session_id": "session-1743696000-42801",
+      "run_id": "run-1743696000-42801",
+      "status": "completed",
+      "created_at": "2026-04-01T12:00:00Z",
+      "updated_at": "2026-04-01T12:01:43Z",
+      "problem_name": "exchange_relax",
+      "requested_backend": "auto",
+      "resolved_backend": "fdm",
+      "execution_mode": "strict",
+      "execution_precision": "double",
+      "cancel_allowed": false
+    }
+  ],
+  "total": 1
+}
+```
+
+---
+
+### Create session
+
+**`POST /v1/sessions`**
+
+Creates a new session from a script or launch request when the API is the session creator. In the normal CLI workflow, the session is created automatically by the launcher; use this endpoint when submitting from an external client.
+
+<ParamField body="script_path" type="string" required>
+  Absolute or repo-relative path to the Python script to execute.
+</ParamField>
+
+<ParamField body="backend" type="string" default="auto">
+  Requested backend. One of `fdm`, `fem`, `hybrid`, `auto`.
+</ParamField>
+
+<ParamField body="mode" type="string" default="strict">
+  Execution mode. One of `strict`, `extended`, `hybrid`.
+</ParamField>
+
+<ParamField body="precision" type="string" default="double">
+  Floating-point precision. One of `single`, `double`.
+</ParamField>
+
+<ParamField body="headless" type="boolean" default="false">
+  If `true`, suppress the browser control room bootstrap.
+</ParamField>
+
+<CodeGroup>
+
+```bash Create from script
+curl -X POST http://localhost:8080/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "script_path": "examples/exchange_relax.py",
+    "backend": "auto",
+    "precision": "double"
+  }'
+```
+
+```bash Headless with FDM
+curl -X POST http://localhost:8080/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "script_path": "examples/exchange_relax.py",
+    "backend": "fdm",
+    "headless": true
+  }'
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "session_id": "session-1743696000-42801",
+  "run_id": "run-1743696000-42801",
+  "status": "starting",
+  "created_at": "2026-04-01T12:00:00Z",
+  "updated_at": "2026-04-01T12:00:00Z",
+  "problem_name": null,
+  "requested_backend": "auto",
+  "resolved_backend": null,
+  "execution_mode": "strict",
+  "execution_precision": "double",
+  "cancel_allowed": true
+}
+```
+
+---
+
+### Get session
+
+**`GET /v1/sessions/:id`**
+
+Returns the canonical session summary, including the full problem summary, plan summary, diagnostics, and latest artifact index.
+
+<ParamField path="id" type="string" required>
+  The `session_id` of the session to fetch.
+</ParamField>
+
+<CodeGroup>
+
+```bash Get session
+curl http://localhost:8080/v1/sessions/session-1743696000-42801
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "session_id": "session-1743696000-42801",
+  "run_id": "run-1743696000-42801",
+  "status": "running",
+  "created_at": "2026-04-01T12:00:00Z",
+  "updated_at": "2026-04-01T12:00:05Z",
+  "problem_name": "exchange_relax",
+  "script_path": "/workspace/examples/exchange_relax.py",
+  "requested_backend": "auto",
+  "resolved_backend": "fdm",
+  "execution_mode": "strict",
+  "execution_precision": "double",
+  "problem_summary": {
+    "geometry": "Box",
+    "physics": ["Exchange", "Demag"],
+    "study": "TimeEvolution(LLG-Heun)"
+  },
+  "plan_summary": {
+    "backend": "fdm",
+    "device": "cpu",
+    "runtime_family": "cpu-reference"
+  },
+  "diagnostics": [],
+  "latest_artifacts": {
+    "scalars": "scalars.csv",
+    "fields/m": "fields/m/step_0100.json"
+  },
+  "cancel_allowed": true
+}
+```
+
+---
+
+### Subscribe to session events
+
+**`GET /v1/sessions/:id/events`**
+
+Server-Sent Events stream for the session. The connection remains open and delivers events as they occur. Subscribe as early as possible to avoid missing events from fast-completing sessions.
+
+<ParamField path="id" type="string" required>
+  The `session_id` to subscribe to.
+</ParamField>
+
+Every event carries:
+
+<ResponseField name="kind" type="string" required>
+  Event kind. See the table below.
+</ResponseField>
+
+<ResponseField name="session_id" type="string" required>
+  Owning session identifier.
+</ResponseField>
+
+<ResponseField name="run_id" type="string" required>
+  Owning run identifier.
+</ResponseField>
+
+<ResponseField name="sequence" type="number" required>
+  Monotonically increasing sequence number within the session stream.
+</ResponseField>
+
+<ResponseField name="timestamp" type="string" required>
+  ISO 8601 event timestamp.
+</ResponseField>
+
+<ResponseField name="payload" type="object">
+  Event-specific payload. Schema varies by `kind`.
+</ResponseField>
+
+#### Event kinds
+
+| Kind | Description |
+|---|---|
+| `session_state_changed` | Session moved to a new lifecycle state. `payload.status` contains the new state. |
+| `plan_ready` | Planner produced a plan. `payload.plan_summary` contains the resolved plan. |
+| `log_line` | One line of solver or launcher log output. `payload.line` is the text. |
+| `step_stats` | Per-step scalar statistics. `payload` contains `step`, `time`, `solver_dt`, `E_ex`, and other active energy terms. |
+| `snapshot_available` | A field snapshot is available on demand via the run endpoints. `payload.field` and `payload.step` identify the snapshot. |
+| `artifact_written` | An artifact was written. `payload.path` is the artifact path within the run artifact tree. |
+| `run_completed` | Run finished successfully. |
+| `run_failed` | Run failed. `payload.error` contains the error description. |
+
+<Warning>
+  Heavy field payloads are never pushed through the event stream. The stream delivers lightweight scalar statistics and availability notices only. Fetch field data on demand using the [Run field endpoints](/api/rest/runs#get-field-snapshot).
+</Warning>
+
+<CodeGroup>
+
+```bash Subscribe to events
+curl -N -H "Accept: text/event-stream" \
+  http://localhost:8080/v1/sessions/session-1743696000-42801/events
+```
+
+</CodeGroup>
+
+```text SSE event stream example
+data: {"kind":"session_state_changed","session_id":"session-1743696000-42801","run_id":"run-1743696000-42801","sequence":1,"timestamp":"2026-04-01T12:00:01Z","payload":{"status":"validating"}}
+
+data: {"kind":"plan_ready","session_id":"session-1743696000-42801","run_id":"run-1743696000-42801","sequence":2,"timestamp":"2026-04-01T12:00:02Z","payload":{"plan_summary":{"backend":"fdm","device":"cpu","runtime_family":"cpu-reference"}}}
+
+data: {"kind":"session_state_changed","session_id":"session-1743696000-42801","run_id":"run-1743696000-42801","sequence":3,"timestamp":"2026-04-01T12:00:03Z","payload":{"status":"running"}}
+
+data: {"kind":"step_stats","session_id":"session-1743696000-42801","run_id":"run-1743696000-42801","sequence":4,"timestamp":"2026-04-01T12:00:04Z","payload":{"step":100,"time":1e-11,"solver_dt":1e-13,"E_ex":-1.234e-18}}
+
+data: {"kind":"snapshot_available","session_id":"session-1743696000-42801","run_id":"run-1743696000-42801","sequence":5,"timestamp":"2026-04-01T12:00:04Z","payload":{"field":"m","step":100}}
+
+data: {"kind":"run_completed","session_id":"session-1743696000-42801","run_id":"run-1743696000-42801","sequence":6,"timestamp":"2026-04-01T12:00:43Z","payload":{}}
+```
+
+---
+
+### Cancel session
+
+**`POST /v1/sessions/:id/cancel`**
+
+Requests cancellation of a running or queued session. The session moves to `cancelled` asynchronously; poll `GET /v1/sessions/:id` or subscribe to the event stream to confirm.
+
+<ParamField path="id" type="string" required>
+  The `session_id` of the session to cancel.
+</ParamField>
+
+<Warning>
+  Cancellation is only allowed when `cancel_allowed` is `true` on the session resource. Sending this request when cancellation is not allowed returns `409 Conflict`.
+</Warning>
+
+<CodeGroup>
+
+```bash Cancel session
+curl -X POST http://localhost:8080/v1/sessions/session-1743696000-42801/cancel
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "session_id": "session-1743696000-42801",
+  "status": "cancelled",
+  "cancel_allowed": false
+}
+```
+
+---
+
+## Error responses
+
+All endpoints use standard HTTP status codes.
+
+| Status | Meaning |
+|---|---|
+| `400 Bad Request` | Request body is malformed or missing required fields |
+| `404 Not Found` | Session with the given `id` does not exist |
+| `409 Conflict` | Operation not allowed in the session's current state (e.g. cancel when already completed) |
+| `500 Internal Server Error` | Unexpected control-plane error |

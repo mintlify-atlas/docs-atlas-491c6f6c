@@ -1,0 +1,354 @@
+---
+title: "Runtime layer"
+description: "Control how and where a simulation executes: backend selection, precision, and result inspection."
+keywords: ["runtime", "Simulation", "Result", "backend", "FDM", "FEM", "execution mode", "precision", "RuntimeSelection"]
+---
+
+The runtime layer answers the question **how and where do we execute?** It takes a fully described `Problem` and a set of execution preferences, validates them, and drives execution through the native Rust engine.
+
+---
+
+## Simulation
+
+The entry point for running a fully described problem.
+
+```python
+result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+```
+
+```python
+fm.Simulation(
+    problem=problem,
+    backend="fdm",
+    mode="strict",
+    precision="double",
+)
+```
+
+<ParamField path="problem" type="Problem" required>
+  The fully assembled `Problem` object. See [Model layer](/api/python/model-layer).
+</ParamField>
+
+<ParamField path="backend" type="string">
+  Discretization backend to use. Overrides any `RuntimeSelection` embedded in the problem.
+
+  | Value | Description |
+  |---|---|
+  | `"auto"` | Planner selects based on available capabilities and discretization hints. |
+  | `"fdm"` | Finite-difference method on a regular Cartesian grid. |
+  | `"fem"` | Finite-element method on an unstructured tetrahedral mesh. |
+  | `"hybrid"` | FDM magnetics with FEM stray-field (future). Requires `mode="hybrid"`. |
+
+  Defaults to the value in `problem.runtime.backend_target`.
+</ParamField>
+
+<ParamField path="mode" type="string">
+  Execution mode controlling capability enforcement.
+
+  | Value | Description |
+  |---|---|
+  | `"strict"` | Only fully validated, publicly executable physics. Raises on unimplemented features. |
+  | `"extended"` | Allows backend-specific extensions and experimental paths. |
+  | `"hybrid"` | Required when `backend="hybrid"`. |
+
+  Defaults to the value in `problem.runtime.execution_mode`.
+</ParamField>
+
+<ParamField path="precision" type="string">
+  Floating-point precision for compute kernels.
+
+  | Value | Description |
+  |---|---|
+  | `"double"` | 64-bit floating point. Default. Required for the CPU reference FDM path. |
+  | `"single"` | 32-bit floating point. Public-executable on CUDA FDM (calibrated). Not supported on CPU FDM or FEM. |
+
+  Defaults to the value in `problem.runtime.execution_precision`.
+</ParamField>
+
+### Simulation.plan()
+
+Return a planning summary without executing. Useful for inspecting backend selection and capability status before committing to a run.
+
+```python
+result = fm.Simulation(problem, backend="fdm").plan()
+print(result.status)   # "planned"
+for note in result.notes:
+    print(note)
+```
+
+**Returns:** `Result` with `status="planned"` and human-readable `notes`.
+
+---
+
+### Simulation.run()
+
+Execute the simulation through the native reference engine.
+
+```python
+result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+result = fm.Simulation(problem).run(until=2e-9, output_dir="my_run")
+```
+
+<ParamField path="until" type="float">
+  Simulation stop time in seconds. If not provided the method returns a `"planned"` result without executing.
+</ParamField>
+
+<ParamField path="output_dir" type="string">
+  Directory path for artifact output (field snapshots, scalar traces). Defaults to `"run_output"`. Pass `None` to use the default.
+</ParamField>
+
+**Returns:** [`Result`](#result).
+
+<Note>
+The current executable subset is FDM + CPU with `Exchange`, `Demag`, and `Zeeman` on `Box` geometries. Other combinations serialize to IR and plan successfully but return `status="not-executable"` until the corresponding backend is implemented.
+</Note>
+
+---
+
+## Result
+
+The return value of `Simulation.plan()` and `Simulation.run()`.
+
+```python
+result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+
+print(result.status)       # "completed" | "planned" | "not-executable"
+print(result.backend)      # BackendTarget.FDM
+print(result.precision)    # ExecutionPrecision.DOUBLE
+print(len(result.steps))   # number of recorded steps
+```
+
+<ResponseField name="status" type="string" required>
+  Execution outcome: `"completed"`, `"planned"`, or `"not-executable"`.
+</ResponseField>
+
+<ResponseField name="backend" type="BackendTarget" required>
+  Resolved backend that was used (or would have been used).
+</ResponseField>
+
+<ResponseField name="mode" type="ExecutionMode" required>
+  Resolved execution mode.
+</ResponseField>
+
+<ResponseField name="precision" type="ExecutionPrecision" required>
+  Resolved floating-point precision.
+</ResponseField>
+
+<ResponseField name="notes" type="string[]">
+  Human-readable capability or planning notes from the runner.
+</ResponseField>
+
+<ResponseField name="steps" type="StepStats[]">
+  Per-step statistics recorded during execution. Empty for planning-only results.
+
+  <Expandable title="StepStats fields">
+    <ResponseField name="step" type="integer">Step index.</ResponseField>
+    <ResponseField name="time" type="float">Simulation time at end of step in seconds.</ResponseField>
+    <ResponseField name="dt" type="float">Timestep used in seconds.</ResponseField>
+    <ResponseField name="e_ex" type="float">Exchange energy in Joules.</ResponseField>
+    <ResponseField name="e_demag" type="float">Demagnetization energy in Joules.</ResponseField>
+    <ResponseField name="e_ext" type="float">External field (Zeeman) energy in Joules.</ResponseField>
+    <ResponseField name="e_total" type="float">Total energy in Joules.</ResponseField>
+    <ResponseField name="max_dm_dt" type="float">Maximum |dm/dt| across all cells.</ResponseField>
+    <ResponseField name="max_h_eff" type="float">Maximum |H_eff| across all cells in A/m.</ResponseField>
+    <ResponseField name="wall_time_ns" type="integer">Wall-clock time for this step in nanoseconds.</ResponseField>
+    <ResponseField name="e_ani" type="float">Anisotropy energy in Joules (zero when not active).</ResponseField>
+    <ResponseField name="e_dmi" type="float">DMI energy in Joules (zero when not active).</ResponseField>
+    <ResponseField name="max_h_demag" type="float">Maximum |H_demag| across all cells in A/m.</ResponseField>
+    <ResponseField name="error_estimate" type="float">Embedded error estimate (adaptive integrators only).</ResponseField>
+    <ResponseField name="rejected_attempts" type="integer">Number of rejected step attempts (adaptive integrators only).</ResponseField>
+    <ResponseField name="rhs_evals" type="integer">Number of right-hand-side evaluations this step.</ResponseField>
+    <ResponseField name="demag_solves" type="integer">Number of demag solves this step.</ResponseField>
+    <ResponseField name="fsal_reused" type="boolean">Whether the first-same-as-last optimization was applied.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="final_magnetization" type="float[][]">
+  Final per-cell or per-node magnetization vectors as a list of `[mx, my, mz]` triples. `None` when not available.
+</ResponseField>
+
+<ResponseField name="output_dir" type="string">
+  Directory where artifacts were written. `None` for planning-only results.
+</ResponseField>
+
+### Result.save_state()
+
+Persist the final magnetization to a file.
+
+```python
+result.save_state("output/final_m.zarr")
+result.save_state("output/final_m.h5", format="h5", dataset="m")
+```
+
+<ParamField path="path" type="string | Path" required>
+  Destination path. Format is inferred from the file extension unless overridden.
+</ParamField>
+
+<ParamField path="format" type="string" default="auto">
+  Serialization format: `"json"`, `"zarr"`, `"h5"`, or `"auto"` (infer from extension).
+</ParamField>
+
+<ParamField path="dataset" type="string" default="values">
+  Dataset key within the file (HDF5 and Zarr only).
+</ParamField>
+
+---
+
+## Enums
+
+### BackendTarget
+
+```python
+from fullmag import BackendTarget
+
+BackendTarget.AUTO    # "auto"
+BackendTarget.FDM     # "fdm"
+BackendTarget.FEM     # "fem"
+BackendTarget.HYBRID  # "hybrid"
+```
+
+### ExecutionMode
+
+```python
+from fullmag import ExecutionMode
+
+ExecutionMode.STRICT    # "strict"
+ExecutionMode.EXTENDED  # "extended"
+ExecutionMode.HYBRID    # "hybrid"
+```
+
+### ExecutionPrecision
+
+```python
+from fullmag import ExecutionPrecision
+
+ExecutionPrecision.DOUBLE  # "double"
+ExecutionPrecision.SINGLE  # "single"
+```
+
+---
+
+## RuntimeSelection
+
+`RuntimeSelection` is the full execution-policy object stored on `Problem.runtime`. You can build one explicitly for fine-grained control.
+
+```python
+# Fluent builder API
+rt = fm.RuntimeSelection()
+rt = rt.engine("fdm").precision("double").mode("strict")
+
+# GPU execution (when supported)
+rt = fm.RuntimeSelection().cuda(gpu_count=1).device(0)
+```
+
+<ParamField path="backend_target" type="BackendTarget" default="BackendTarget.AUTO">
+  Requested backend.
+</ParamField>
+
+<ParamField path="device_target" type="DeviceTarget" default="DeviceTarget.AUTO">
+  Compute device: `"auto"`, `"cpu"`, `"cuda"`, or `"gpu"`.
+</ParamField>
+
+<ParamField path="execution_mode" type="ExecutionMode" default="ExecutionMode.STRICT">
+  Execution mode.
+</ParamField>
+
+<ParamField path="execution_precision" type="ExecutionPrecision" default="ExecutionPrecision.DOUBLE">
+  Floating-point precision.
+</ParamField>
+
+<ParamField path="gpu_count" type="integer" default="0">
+  Number of GPUs to use. Requires `device_target="cuda"` or `"gpu"`.
+</ParamField>
+
+<ParamField path="device_index" type="integer">
+  GPU device index. Requires `device_target="cuda"` or `"gpu"`.
+</ParamField>
+
+### Fluent methods
+
+| Method | Effect |
+|---|---|
+| `.engine(backend)` | Return a copy with `backend_target` set. |
+| `.mode(mode)` | Return a copy with `execution_mode` set. |
+| `.precision(precision)` | Return a copy with `execution_precision` set. |
+| `.cpu()` | Return a copy targeting the CPU. |
+| `.cuda(gpu_count=1)` | Return a copy targeting CUDA. |
+| `.device(index)` | Return a copy with a specific GPU device index. |
+| `.threads(n)` | Return a copy with `cpu_threads` set. |
+
+The module-level `fm.backend` is a default `RuntimeSelection()` instance that you can use as a starting point:
+
+```python
+rt = fm.backend.engine("fdm").precision("double")
+problem = fm.Problem(..., runtime=rt)
+```
+
+---
+
+## load_problem_from_script()
+
+Load a `Problem` from a Python script file without executing it. Used by the CLI and UI to inspect and plan simulations defined in external scripts.
+
+```python
+from fullmag import load_problem_from_script
+
+loaded = load_problem_from_script("examples/exchange_relax.py")
+print(loaded.problem.name)
+```
+
+The script must define one of:
+- A `build()` function returning a `Problem`.
+- A module-level `problem` variable of type `Problem`.
+- Flat scripting calls (`fm.run()`, `fm.relax()`).
+
+<ParamField path="path" type="string | Path" required>
+  Path to the Python script file.
+</ParamField>
+
+<ParamField path="lightweight_assets" type="boolean" default="false">
+  When `True`, skip expensive mesh and grid asset generation during loading.
+</ParamField>
+
+---
+
+## Complete workflow
+
+```python
+import fullmag as fm
+
+# 1. Describe the physical system
+strip  = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+mat    = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+magnet = fm.Ferromagnet(name="strip", geometry=strip, material=mat,
+                        m0=fm.init.random(seed=42))
+
+problem = fm.Problem(
+    name="exchange_relax",
+    magnets=[magnet],
+    energy=[fm.Exchange()],
+    study=fm.Relaxation(
+        algorithm="llg_overdamped",
+        torque_tolerance=5e-2,
+        dynamics=fm.LLG(fixed_timestep=1e-13),
+        outputs=[
+            fm.SaveField("m", every=100e-12),
+            fm.SaveScalar("E_ex", every=10e-12),
+        ],
+    ),
+    discretization=fm.DiscretizationHints(fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9))),
+)
+
+# 2. Execute
+result = fm.Simulation(problem, backend="fdm").run(until=2e-9)
+
+# 3. Inspect results
+print(f"Status:      {result.status}")
+print(f"Steps:       {len(result.steps)}")
+print(f"Final E_ex:  {result.steps[-1].e_ex:.4e} J")
+print(f"Artifacts:   {result.output_dir}")
+
+# 4. Save final magnetization
+if result.final_magnetization:
+    result.save_state("output/final_m.zarr")
+```

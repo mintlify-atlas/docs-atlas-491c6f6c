@@ -1,0 +1,182 @@
+---
+title: "Backends and precision"
+description: "FDM and FEM backends, device targets, precision modes, and execution policy for Fullmag simulations."
+---
+
+Fullmag exposes two native compute backends — FDM and FEM — behind one shared `ProblemIR` contract. The user selects a backend, device, and precision in `Simulation()`; Rust owns the planning, capability checks, and runtime dispatch.
+
+---
+
+## FDM backend
+
+The Finite Difference Method backend operates on a regular Cartesian cell grid derived directly from `Box` geometry and `FDM(cell=...)` hints.
+
+- **Grid**: cell-based, SoA field layout, derived from `Box.size / FDM.cell`
+- **Exchange**: 6-point stencil over nearest-neighbour cells
+- **Demag**: Newell tensor FFT convolution
+- **Zeeman**: uniform external field `H_ext = B / μ₀`
+- **Integrator**: LLG Heun stepper
+- **Precision**: `double` on CPU; `double` and `single` on CUDA GPU
+- **Runtime form**: bundled CPU reference or managed CUDA OCI/Apptainer image (`fdm-cuda`)
+
+FDM hints live in an explicit block and do not leak into the shared model:
+
+```python
+fm.DiscretizationHints(
+    fdm=fm.FDM(
+        cell=(2e-9, 2e-9, 5e-9),
+        pbc=(False, False, False),   # later
+        demag_solver="fft",          # later
+    )
+)
+```
+
+---
+
+## FEM backend
+
+The Finite Element Method backend is built on MFEM + libCEED + hypre and operates on an unstructured tetrahedral mesh.
+
+- **Mesh**: Box → mesh lowering for simple cases; imported `.msh`/STL for complex geometries
+- **Exchange**: lumped-mass P1 operator
+- **Demag**: bootstrap transfer-grid seam (CPU reference) and native MFEM path
+- **Element order**: linear (order=1) or quadratic (order=2)
+- **Precision**: `double` only at this stage
+- **Runtime form**: managed `fem-gpu` OCI/Apptainer image with CUDA, MFEM, libCEED, hypre
+
+FEM hints:
+
+```python
+fm.DiscretizationHints(
+    fem=fm.FEM(
+        mesh=None,          # None = auto-generate from geometry
+        hmax=2e-9,          # maximum element size in metres
+        order=1,
+        solver="cg",        # later
+        preconditioner="amg", # later
+    )
+)
+```
+
+---
+
+## Selecting backend, device, and precision
+
+All three are set in `Simulation()`:
+
+```python
+fm.Simulation(
+    problem,
+    backend="fdm",        # "fdm" | "fem" | "auto"
+    mode="strict",        # "strict" | "extended" | "hybrid"
+    precision="double",   # "single" | "double"
+)
+```
+
+<Tabs>
+  <Tab title="FDM">
+    ```python
+    import fullmag as fm
+
+    problem = build_problem()   # see authoring-scripts guide
+
+    # CPU reference (double only)
+    result = fm.Simulation(problem, backend="fdm", precision="double").run(until=2e-9)
+
+    # CUDA GPU (double or calibrated single)
+    result = fm.Simulation(
+        problem,
+        backend="fdm",
+        precision="double",   # or "single" on CUDA
+    ).run(until=2e-9)
+    ```
+  </Tab>
+  <Tab title="FEM">
+    ```python
+    import fullmag as fm
+
+    problem = fm.Problem(
+        name="exchange_demag_zeeman",
+        magnets=[magnet],
+        energy=[fm.Exchange(), fm.Demag(), fm.Zeeman(B=(0.0, 0.0, 0.05))],
+        study=fm.TimeEvolution(
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=50e-12),
+                fm.SaveField("H_ex", every=50e-12),
+                fm.SaveField("H_demag", every=50e-12),
+                fm.SaveScalar("E_ex", every=10e-12),
+                fm.SaveScalar("E_demag", every=10e-12),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fem=fm.FEM(mesh=None, hmax=4e-9, order=1),
+        ),
+    )
+
+    result = fm.Simulation(problem, backend="fem", precision="double").run(until=2e-9)
+    ```
+  </Tab>
+  <Tab title="auto">
+    ```python
+    import fullmag as fm
+
+    # Planner resolves "auto" to "fdm" in strict/extended mode during bootstrap
+    result = fm.Simulation(problem, backend="auto").run(until=2e-9)
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+  `backend="auto"` resolves to `fdm` for `strict` and `extended` execution modes during bootstrap planning. Hybrid planning is a deliberate opt-in, not a fallback.
+</Note>
+
+---
+
+## Execution modes
+
+The `mode` parameter controls whether backend-specific features are allowed.
+
+| Mode | Meaning |
+|---|---|
+| `strict` | Backend-neutral semantics only. Any backend-specific hint raises a planning error. |
+| `extended` | Backend hints allowed. Allows `fdm`- or `fem`-specific knobs in explicit hint blocks. |
+| `hybrid` | Explicit opt-in for future hybrid FDM/FEM execution. Requires hybrid backend. |
+
+```python
+fm.Simulation(problem, backend="fdm", mode="strict").run()
+fm.Simulation(problem, backend="fdm", mode="extended").run()
+```
+
+---
+
+## Precision support matrix
+
+| Backend | Device | Precision | Status |
+|---|---|---|---|
+| FDM | CPU | `double` | **public-executable** |
+| FDM | CPU | `single` | not supported |
+| FDM | CUDA GPU | `double` | **public-executable** |
+| FDM | CUDA GPU | `single` | **public-executable** (calibrated) |
+| FEM | CPU | `double` | **public-executable** |
+| FEM | CPU | `single` | not supported |
+| FEM | CUDA GPU | `double` | in progress |
+| FEM | CUDA GPU | `single` | not supported |
+
+<Warning>
+  CPU reference FDM is `double`-only. Requesting `precision="single"` on a CPU FDM path will surface a planning capability error rather than silently falling back to double. CUDA FDM supports calibrated `single` for both single-body and multilayer paths.
+</Warning>
+
+---
+
+## Capability status tags
+
+Every feature in the capability matrix carries exactly one status tag. These tags appear consistently in Python errors, CLI output, API responses, browser badges, and docs.
+
+| Tag | Meaning |
+|---|---|
+| `semantic-only` | Legal in Python API and `ProblemIR`. Not numerically implemented. |
+| `internal-reference` | Implemented in `fullmag-engine` but not wired to the public `Simulation.run()` path. |
+| `public-executable` | Fully wired end-to-end: `Simulation.run()` → plan → runner → engine → artifacts. |
+
+The current public-executable slice is `Box + Exchange + Demag + Zeeman + TimeEvolution(LLG-Heun) + FDM`.

@@ -1,0 +1,249 @@
+---
+title: 'Execution model'
+description: 'Sessions, lifecycle states, backend targets, device targets, execution modes, precision, and how planning resolves user intent into a concrete execution plan.'
+keywords: ['execution model', 'session', 'lifecycle', 'backend', 'fdm', 'fem', 'precision', 'planning', 'simulation']
+---
+
+Every Fullmag simulation runs inside a **session**. A session is the single runtime abstraction that unifies local CLI execution, Jupyter notebook monitoring, and future remote execution.
+
+## Sessions and runs
+
+One session is created per `fullmag script.py` invocation (or per `Simulation.run()` call in notebook mode). A session owns:
+
+- lifecycle state and state transitions,
+- normalized problem summary from `ProblemIR`,
+- plan summary from `ExecutionPlanIR`,
+- run state and step/time counters,
+- event stream,
+- logs,
+- artifact index,
+- provenance,
+- cancellation state.
+
+<Note>
+The session abstraction is what allows the browser control room to show live run data: the browser subscribes to the session event stream rather than polling files directly.
+</Note>
+
+## Session lifecycle
+
+<Steps>
+  <Step title="starting">
+    The Rust launcher has received the CLI request and is initializing internal state.
+  </Step>
+  <Step title="loading_script">
+    The Python helper has been spawned in the user environment. The script is being loaded and the `ProblemIR` is being serialized.
+  </Step>
+  <Step title="validating">
+    Rust is validating and normalizing the received `ProblemIR`. Structural checks, name uniqueness, cross-reference integrity, and capability tier checks run here.
+  </Step>
+  <Step title="planning">
+    Rust is lowering the validated `ProblemIR` into an `ExecutionPlanIR`. Backend selection, device selection, precision confirmation, and planner diagnostics are produced.
+  </Step>
+  <Step title="running">
+    The native backend is executing the plan. The event stream emits `step_stats`, `snapshot_available`, and `artifact_written` events.
+  </Step>
+  <Step title="completed / failed / cancelled">
+    Terminal states. `completed` means all outputs were written and the plan finished normally. `failed` carries an error reason and diagnostics. `cancelled` means the user requested cancellation.
+  </Step>
+</Steps>
+
+## The `Simulation` constructor
+
+The runtime layer is expressed entirely through `Simulation`:
+
+```python
+import fullmag as fm
+
+fm.Simulation(
+    problem,
+    backend="fdm",       # backend target
+    device="auto",       # device target
+    mode="strict",       # execution mode
+    precision="double",  # floating-point precision
+    ui="auto",           # UI policy
+).run()
+```
+
+`Simulation.plan()` returns a plan summary without starting execution. `Simulation.run()` executes and returns a `Result`.
+
+## Backend targets
+
+<Tabs>
+  <Tab title="fdm">
+    Finite Difference Method. The current primary executable backend.
+
+    - Production target: C++/CUDA, GPU-first.
+    - CPU reference: available for trusted `double` baseline behavior.
+    - Cell size is specified in `DiscretizationHints.fdm`.
+
+    ```python
+    fm.Simulation(problem, backend="fdm", precision="double").run()
+    ```
+  </Tab>
+  <Tab title="fem">
+    Finite Element Method. Uses MFEM + libCEED + hypre.
+
+    - Imported mesh first; Box meshing second.
+    - Mesh policy specified in `DiscretizationHints.fem`.
+
+    ```python
+    fm.Simulation(problem, backend="fem", precision="double").run()
+    ```
+  </Tab>
+  <Tab title="auto">
+    The planner resolves `auto` to a concrete backend at planning time. During bootstrap planning, `auto` resolves to `fdm` for `strict` and `extended` modes.
+
+    `auto` does **not** resolve to `hybrid` implicitly. Hybrid planning is a deliberate opt-in.
+
+    ```python
+    fm.Simulation(problem, backend="auto").run()
+    ```
+  </Tab>
+  <Tab title="hybrid (future)">
+    Coupled FDM/FEM planning. Requires `mode="hybrid"` and explicit `fm.Hybrid` discretization hints. Currently semantic-only.
+
+    ```python
+    fm.Simulation(problem, backend="hybrid", mode="hybrid").run()
+    ```
+  </Tab>
+</Tabs>
+
+## Device targets
+
+| Value | Meaning |
+|-------|---------|
+| `cpu` | Force CPU execution. The CPU reference runner is used. |
+| `gpu` | Request GPU execution. Requires a compatible CUDA-capable device for FDM. |
+| `auto` | The planner selects the best available device. |
+
+<Note>
+`device` is distinct from `backend`. `backend="fdm"` selects the discretization method. `device="gpu"` selects the hardware. A GPU FDM run uses `backend="fdm", device="gpu"`.
+</Note>
+
+## Execution modes
+
+| Mode | Meaning |
+|------|---------|
+| `strict` | Only backend-neutral semantics are allowed. The same problem must be expressible in both FDM and FEM without modification. |
+| `extended` | Backend-specific features are allowed explicitly, through `DiscretizationHints` backend hint blocks. |
+| `hybrid` | Explicit coupled FDM/FEM planning. Requires `backend="hybrid"`. |
+
+The mode constraint applies to feature validation: features that are only legal in `extended` mode will be rejected by the validator if `mode="strict"`.
+
+<Warning>
+`backend="hybrid"` requires `mode="hybrid"` and vice versa. Mismatched combinations are rejected at validation time.
+</Warning>
+
+## Precision
+
+| Value | Current status |
+|-------|---------------|
+| `double` | Public-executable on CPU reference FDM and FEM. |
+| `single` | Public-executable on CUDA FDM. CPU reference FDM is `double`-only. |
+
+Precision is an execution policy choice, not a change to the physical problem. It is carried in `BackendPolicyIR.execution_precision` and does not affect `StudyIR`, `MaterialIR`, or `EnergyTermsIR`.
+
+```python
+# Double precision — CPU reference or GPU
+fm.Simulation(problem, backend="fdm", precision="double").run()
+
+# Single precision — CUDA FDM only
+fm.Simulation(problem, backend="fdm", device="gpu", precision="single").run()
+```
+
+## UI policy
+
+| Value | Behavior |
+|-------|----------|
+| `True` | Always launch and open the browser control room. |
+| `False` | Headless execution. No browser launch. API server optional. Artifacts still written. |
+| `"auto"` | Launch the browser when running from the CLI in an interactive session; skip it otherwise (e.g., in CI or notebooks). |
+
+```python
+# Headless — useful for scripts, CI, and HPC
+fm.Simulation(problem, backend="fdm", ui=False).run()
+
+# Explicit UI — browser opens with the live run page
+fm.Simulation(problem, backend="fdm", ui=True).run()
+```
+
+## How planning resolves `auto`
+
+When `backend="auto"`, the planner applies the following resolution rules:
+
+1. If `mode="hybrid"` is set, the planner raises an error: hybrid requires an explicit `backend="hybrid"`.
+2. Otherwise, for `mode="strict"` or `mode="extended"`, the planner resolves to `fdm` during bootstrap planning.
+3. The resolved backend and the reason for the resolution are both recorded in the plan summary.
+
+<Info>
+Requested execution intent and resolved execution reality are always distinguishable. `Simulation.plan()` returns both. The artifact `execution_plan.json` also records both.
+</Info>
+
+## The `Result` object
+
+`Simulation.run()` returns a `Result`:
+
+```python
+result = fm.Simulation(problem, backend="fdm", precision="double").run()
+
+print(result.status)        # "completed" | "failed" | "cancelled"
+print(result.session_id)
+print(result.run_id)
+print(result.backend)       # resolved backend, e.g. "fdm"
+print(result.mode)          # resolved mode
+print(result.precision)     # resolved precision
+print(result.plan_summary)  # planner diagnostics
+print(result.artifacts)     # artifact index
+print(result.ui_url)        # when UI is enabled
+```
+
+`Result` is application-level. It never contains raw CUDA pointers, MFEM objects, or backend-specific array structs.
+
+## Execution from the CLI
+
+<Tabs>
+  <Tab title="With UI">
+    ```bash
+    fullmag my_problem.py
+    ```
+
+    The Rust launcher spawns the Python helper, validates and plans `ProblemIR`, starts execution, starts a local API server, and opens the browser to the live control room.
+  </Tab>
+  <Tab title="Headless">
+    ```bash
+    fullmag my_problem.py --headless
+    ```
+
+    Same plan and execution contract. No browser launch. API server optional. Artifacts are still written.
+  </Tab>
+  <Tab title="Plan only">
+    ```bash
+    fullmag plan my_problem.py
+    ```
+
+    Serializes `ProblemIR`, runs the planner, and prints the plan summary. Does not start execution.
+  </Tab>
+</Tabs>
+
+## Backend-specific hint blocks
+
+Backend-specific knobs are only allowed inside explicit hint blocks. They must never appear as ambient parameters in the shared model.
+
+```python
+fm.DiscretizationHints(
+    fdm=fm.FDM(
+        cell=(2e-9, 2e-9, 2e-9),
+        pbc=(False, False, False),  # later
+        demag_solver="fft",         # later
+    ),
+    fem=fm.FEM(
+        mesh="track.msh",           # or None for auto-meshing
+        hmax=2e-9,
+        order=1,
+        solver="cg",                # later
+        preconditioner="amg",       # later
+    ),
+)
+```
+
+Shared model semantics remain backend-neutral. Backend specificity is contained inside these blocks or inside explicit `extended` mode.

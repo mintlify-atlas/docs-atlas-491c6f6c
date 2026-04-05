@@ -1,0 +1,190 @@
+---
+title: "HPC execution"
+description: "Running Fullmag on HPC clusters: external dispatch model, session lifecycle, managed runtimes, artifact movement, and provenance."
+---
+
+HPC execution is the same application model as local execution. The user still thinks in terms of one Python script, one `fullmag` launcher, one session, one run, and one artifact/provenance model. What changes is the execution target and dispatch path.
+
+---
+
+## Core model: external-dispatch-first
+
+Fullmag does **not** need to own the cluster orchestrator. The canonical HPC assumption is:
+
+- an external scheduler or workflow system (such as Microlab) places the job and allocates the node,
+- Fullmag is the **node-local simulation executable** inside that allocated task,
+- Fullmag still owns problem loading, execution, artifacts, and provenance for that task.
+
+```text
+User workstation
+  └── writes task.py
+
+Dispatch / control system (Microlab / Slurm)
+  └── allocates node, stages input, launches:
+
+Compute node
+  └── fullmag task.py --headless
+```
+
+This means Fullmag does not require a built-in orchestrator, a mandatory scheduler adapter, a mandatory `submit` command, or ownership of cluster queue lifecycle.
+
+---
+
+## Canonical HPC command
+
+On an allocated compute node, the task is simply:
+
+```bash
+fullmag task.py --headless
+```
+
+Expected behavior on the node:
+
+<Steps>
+  <Step title="Resolve ProblemIR">
+    The Rust host spawns a Python helper in the active environment, which loads `task.py` and returns canonical `ProblemIR`.
+  </Step>
+  <Step title="Validate and plan">
+    Rust validates and plans locally on that node and runtime. Capability checks run against the resolved runtime pack.
+  </Step>
+  <Step title="Resolve runtime pack">
+    The launcher identifies the appropriate managed runtime (`fdm-cuda` or `fem-gpu`) for the node's hardware.
+  </Step>
+  <Step title="Execute">
+    The launcher runs the simulation. The heavy backend executes inside the managed runtime.
+  </Step>
+  <Step title="Write artifacts and provenance">
+    Canonical artifacts are written to the node-local working area. Provenance includes scheduler, job id, GPU allocation, and runtime image details.
+  </Step>
+  <Step title="Clean exit">
+    The task exits cleanly for the surrounding HPC system to collect results and trigger stage-out.
+  </Step>
+</Steps>
+
+---
+
+## Session model on HPC
+
+Local and remote execution share the same session-first model. On HPC, the session may traverse additional lifecycle states before reaching `running`:
+
+| State | When used |
+|---|---|
+| `starting` | Node-local task begins |
+| `loading_script` | Python helper loading `task.py` |
+| `validating` | Rust validation |
+| `planning` | Rust planning and capability checks |
+| `running` | Backend executing |
+| `staging_input` | (Optional) Input files being staged to node |
+| `queued` | (Optional) Job sitting in scheduler queue |
+| `allocating` | (Optional) Node being allocated |
+| `staging_runtime` | (Optional) Runtime image being pulled |
+| `running_remote` | (Optional) Running on a remote node |
+| `staging_output` | (Optional) Artifacts being staged out |
+| `completed` | Run finished successfully |
+| `failed` | Run aborted |
+| `cancelled` | Cancelled by user or scheduler |
+
+<Note>
+  In the external-dispatch-first model, a node-local Fullmag task begins directly at `starting` / `loading_script` / `validating` without Fullmag ever owning `queued` or `submitting`. Those states are owned by the external dispatch system.
+</Note>
+
+---
+
+## Managed runtimes
+
+Heavy backends are packaged as managed runtimes. HPC is the primary motivation for this split.
+
+### Runtime families
+
+| Runtime | Form | Contents |
+|---|---|---|
+| `fdm-cuda` | OCI or Apptainer image | CUDA user-space stack, Fullmag FDM native binaries |
+| `fem-gpu` | OCI or Apptainer image | CUDA, MFEM, libCEED, hypre, Fullmag FEM native binaries |
+
+For HPC sites, preferred forms are:
+- **Apptainer / Singularity images** for sites that require HPC-native container flows
+- OCI/container images where the site supports them
+- Site-managed runtime modules as a compatibility path only
+
+### Building the FEM GPU runtime
+
+```bash
+just build fem-gpu-runtime-host
+```
+
+This builds the heavy FEM GPU stack inside the managed build container and exports a host-usable runtime bundle under `.fullmag/runtimes/`.
+
+<Warning>
+  The FEM GPU stack requires CUDA toolkit, MFEM, libCEED, hypre, Rust nightly, and Node 22 + pnpm 10 (for the control room assets). Do not attempt to build it outside the managed `fem-gpu` container. Use `just build fem-gpu-runtime-host` as the canonical entry point.
+</Warning>
+
+---
+
+## Artifact movement
+
+HPC nodes cannot always serve the browser directly. The canonical model is:
+
+- The heavy solver writes artifacts to a cluster-visible working area
+- Outputs are staged into the canonical artifact store
+- The browser reads the control-plane artifact view, not raw cluster paths
+
+### Stage-in
+
+The external dispatch system may stage in:
+
+- Normalized `ProblemIR`
+- Script source snapshot
+- Mesh/geometry assets
+- Runtime manifest
+- Chosen runtime image reference
+
+### Stage-out
+
+After the run, stage-out must include:
+
+- `metadata.json`
+- `scalars.csv`
+- `fields/` snapshots
+- `logs.txt`
+- Provenance bundle
+- Failure diagnostics when the run aborts
+
+---
+
+## Provenance requirements
+
+Every HPC run must record the following fields in its provenance bundle. These are queryable through run metadata, not just log trivia.
+
+| Field | Description |
+|---|---|
+| `target_id` | Cluster identifier |
+| `scheduler` | Scheduler type (e.g. `slurm`, `pbs`) |
+| `scheduler_job_id` | Scheduler-assigned job id |
+| `queue` | Queue or partition name |
+| `gpu_allocation` | Requested vs actual GPU allocation |
+| `node_type` | Node type / accelerator type |
+| `runtime_image_id` | Runtime container image identity |
+| `container_digest` | Image digest or tag |
+| `cuda_version` | CUDA driver and runtime versions |
+| `mfem_version` | MFEM/libCEED/hypre runtime identifiers (FEM runs) |
+| `stage_in_path` | Stage-in location or object-store id |
+| `stage_out_path` | Stage-out location or object-store id |
+
+---
+
+## Integration with Microlab and Slurm
+
+The first-class external scheduler target is **Slurm**. Later adapters may include PBS Pro/Torque, LSF, Flux, and site-specific wrapper systems.
+
+When Microlab dispatches tasks, the expected pattern is one task per node:
+
+```bash
+# Inside a Slurm job script, after node allocation:
+fullmag task.py --headless
+```
+
+Fullmag does not require a `fullmag submit` command. An optional future convenience wrapper may exist, but it is not part of the core architectural requirement.
+
+<Note>
+  On HPC, "live" control room updates may mean scheduler-state polling while queued, periodic scalar/log refresh while running, and field snapshot availability notices when outputs are written. The architecture must not assume localhost-grade, always-open streaming from compute nodes.
+</Note>

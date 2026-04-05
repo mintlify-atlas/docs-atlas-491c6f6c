@@ -1,0 +1,260 @@
+---
+title: 'Problem IR'
+description: 'ProblemIR is the canonical intermediate representation that carries backend-neutral problem truth between Python authoring and Rust validation, planning, and backend execution.'
+keywords: ['ProblemIR', 'intermediate representation', 'IR', 'serialization', 'validation', 'planning', 'python', 'rust']
+---
+
+`ProblemIR` is the canonical, typed representation of a Fullmag problem after Python-side serialization and before backend-specific lowering.
+
+The source of truth is the serialized object graph, not Python source text. Rust validates and normalizes the IR; backends consume `ExecutionPlanIR` produced from it.
+
+## What ProblemIR is not
+
+<Note>
+`ProblemIR` carries no grid indices, GPU storage layouts, FEM node coordinates, or backend-specific implementation details. Those belong in `ExecutionPlanIR`, produced by the planner.
+</Note>
+
+## Sections
+
+`ProblemIR` is organized into ten sections. Each section has a single, well-scoped responsibility.
+
+<AccordionGroup>
+  <Accordion title="ProblemMeta">
+    Carries reproducibility metadata for the run. Required for artifact provenance and scientific reproducibility of Python-authored simulations.
+
+    | Field | Description |
+    |-------|-------------|
+    | `ir_version` | IR schema version (currently `0.2.0`) |
+    | `script_language` | Always `"python"` for user-authored problems |
+    | `script_source` | Original script source text when available |
+    | `script_api_version` | Version of the `fullmag` Python package that authored the problem |
+    | `serializer_version` | Version of the serializer that produced this IR |
+    | `entrypoint_kind` | How the problem was created (`cli`, `notebook`, `ui`, etc.) |
+    | `source_hash` | Hash of the original script source |
+    | `runtime_metadata` | Environment metadata (Python version, platform, etc.) |
+    | `backend_revision` | Solver revision at the time of execution |
+    | `seeds` | Random seeds used for stochastic initialization |
+
+    These fields make every run independently reproducible: given the same script, the same `source_hash`, and the same `seeds`, the simulation result must be identical.
+  </Accordion>
+
+  <Accordion title="GeometryIR">
+    A canonical list of geometry entries. Each entry is either an imported geometry reference or an analytic primitive.
+
+    ```json
+    {
+      "geometry": {
+        "entries": [
+          { "kind": "box",               "name": "strip",  "size": [2.0e-7, 2.0e-8, 5.0e-9] },
+          { "kind": "cylinder",          "name": "pillar", "radius": 5.0e-8, "height": 1.0e-8 },
+          { "kind": "imported_geometry", "name": "track",  "source": "track.step", "format": "step" }
+        ]
+      }
+    }
+    ```
+
+    Validation rules:
+    - At least one geometry entry is required.
+    - Geometry names must be unique across all entry kinds.
+    - `Box.size` components must be positive.
+    - `Cylinder.radius` and `Cylinder.height` must be positive.
+  </Accordion>
+
+  <Accordion title="RegionIR">
+    Named spatial regions that group geometry entries for material assignment and boundary conditions. The bootstrap IR separates `RegionIR` and `MaterialIR`; heterogeneous spatial parameter fields are defined in `docs/specs/material-assignment-and-spatial-fields-v0.md`.
+  </Accordion>
+
+  <Accordion title="MaterialIR">
+    Material constants for each named material:
+
+    | Parameter | Description |
+    |-----------|-------------|
+    | `Ms` | Saturation magnetization (A/m) |
+    | `A` | Exchange stiffness constant (J/m) |
+    | `alpha` | Gilbert damping constant (dimensionless) |
+    | `Ku1` | Uniaxial anisotropy constant (J/m³) — semantic-only |
+    | `anisU` | Anisotropy axis unit vector — semantic-only |
+
+    `Ms`, `A`, and `alpha` are public-executable for both FDM and FEM. Anisotropy constants are currently semantic-only.
+  </Accordion>
+
+  <Accordion title="MagnetIR">
+    Each ferromagnet entry references a named geometry and a named material, and carries an `InitialMagnetizationIR`.
+
+    | Variant | Python constructor | Description |
+    |---------|--------------------|-------------|
+    | `Uniform` | `fm.init.uniform(...)` | Fixed unit vector applied to all cells/nodes |
+    | `RandomSeeded` | `fm.init.random(seed=...)` | Deterministic xorshift64 RNG in the planner |
+    | `SampledField` | `fm.init.from_function(...)` | Per-cell/node vectors (once lowering-time sampling is implemented) |
+
+    Validation rules:
+    - `Uniform.value` must contain exactly 3 components.
+    - `RandomSeeded.seed` must be positive.
+    - `SampledField.values` must be non-empty.
+  </Accordion>
+
+  <Accordion title="EnergyTermsIR">
+    The list of energy contributions active in the simulation:
+
+    | Term | Tier | Notes |
+    |------|------|-------|
+    | `Exchange` | public-executable (FDM/FEM) | 6-point stencil (FDM), lumped-mass P1 operator (FEM) |
+    | `Demag` | public-executable (FDM/FEM) | Newell tensor FFT (FDM), bootstrap transfer-grid seam (FEM) |
+    | `Zeeman` | public-executable (FDM/FEM) | User provides `B`; planner normalizes to `H_ext` in A/m |
+    | `InterfacialDMI` | semantic-only | Not numerically implemented |
+    | `Magnetoelastic` | internal-reference | Prescribed-strain H_mel wired into H_eff |
+  </Accordion>
+
+  <Accordion title="StudyIR">
+    The canonical carrier for computation intent. What kind of computation are you requesting?
+
+    **`TimeEvolution`**
+    ```python
+    fm.TimeEvolution(
+        dynamics=fm.LLG(integrator="heun", fixed_timestep=1e-13),
+        until=2e-9,
+        outputs=[
+            fm.SaveField("m", every=1e-12),
+            fm.SaveScalar("E_ex", every=1e-12),
+        ],
+    )
+    ```
+
+    **`Relaxation`** — with algorithm selection:
+
+    | Algorithm | Tier | Description |
+    |-----------|------|-------------|
+    | `llg_overdamped` | public-executable (FDM/FEM) | Reuses LLG field pipeline with high damping |
+    | `projected_gradient_bb` | public-executable (FDM) | Barzilai–Borwein on sphere product manifold |
+    | `nonlinear_cg` | public-executable (FDM) | Polak–Ribière+ CG with tangent-space transport |
+    | `tangent_plane_implicit` | semantic-only | FEM relaxation; execution deferred |
+
+    Future study types: `Eigenmodes`, `StaticSolve`.
+  </Accordion>
+
+  <Accordion title="SamplingIR">
+    Output sampling policy: which quantities to record, at what intervals, and in what format.
+
+    Current public-executable field outputs: `m`, `H_ex`, `H_demag`, `H_ext`, `H_eff`.
+
+    Current public-executable scalar outputs: `E_ex`, `E_demag`, `E_ext`, `E_total`, `time`, `step`, `solver_dt`, `max_dm_dt`, `max_h_eff`.
+  </Accordion>
+
+  <Accordion title="BackendPolicyIR">
+    Execution policy chosen by the user. Three fields:
+
+    | Field | Values | Notes |
+    |-------|--------|-------|
+    | `backend_target` | `fdm`, `fem`, `auto`, `hybrid` | Which discretization method to use |
+    | `execution_mode` | `strict`, `extended`, `hybrid` | Which feature set is allowed |
+    | `execution_precision` | `double`, `single` | Floating-point precision for the backend |
+
+    Precision is an execution choice, not a change to the physical problem. It belongs here rather than in `StudyIR` or `MaterialIR`.
+
+    <Note>
+    `double` is the current public-executable precision for CPU reference FDM and FEM. `single` is public-executable on CUDA FDM. CPU reference FDM remains `double`-only.
+    </Note>
+  </Accordion>
+
+  <Accordion title="ValidationProfileIR">
+    Carries the resolved capability and validation state: which features are semantic-only in this problem, which are executable, and what the planner determined. Produced by Rust validation; not authored by Python.
+  </Accordion>
+</AccordionGroup>
+
+## How Python objects become ProblemIR
+
+Python objects build a declarative graph. When `Simulation.run()` or `Simulation.plan()` is called, the graph serializes to `ProblemIR` via the Python helper, which Rust then validates.
+
+```python
+import fullmag as fm
+
+geom = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+mat  = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.02)
+mag  = fm.Ferromagnet(
+    name="strip",
+    geometry=geom,
+    material=mat,
+    m0=fm.init.random(seed=42),
+)
+
+problem = fm.Problem(
+    name="exchange_relax",
+    magnets=[mag],
+    energy=[fm.Exchange(), fm.Demag()],
+    study=fm.TimeEvolution(
+        dynamics=fm.LLG(integrator="heun", fixed_timestep=1e-13),
+        until=2e-9,
+        outputs=[
+            fm.SaveField("m", every=1e-12),
+            fm.SaveScalar("E_ex", every=1e-12),
+        ],
+    ),
+    discretization=fm.DiscretizationHints(
+        fdm=fm.FDM(cell=(2e-9, 2e-9, 2e-9)),
+        fem=fm.FEM(hmax=2e-9, order=1),
+    ),
+)
+```
+
+The mapping is direct: one Python class → one IR section entry.
+
+| Python class | IR section |
+|-------------|------------|
+| `fm.Box`, `fm.Cylinder`, `fm.ImportedGeometry` | `GeometryIR` |
+| `fm.Material` | `MaterialIR` |
+| `fm.Ferromagnet` | `MagnetIR` |
+| `fm.Exchange`, `fm.Demag`, `fm.Zeeman`, `fm.InterfacialDMI` | `EnergyTermsIR` |
+| `fm.TimeEvolution`, `fm.Relaxation` | `StudyIR` |
+| `fm.SaveField`, `fm.SaveScalar` | `SamplingIR` |
+| `fm.FDM`, `fm.FEM`, backend/mode/precision args | `BackendPolicyIR` |
+
+## Inspecting the IR
+
+You can inspect the IR produced for any script without running the simulation:
+
+```python
+from fullmag import load_problem_from_script
+
+loaded = load_problem_from_script("my_problem.py")
+print(loaded.problem.to_ir())
+```
+
+The output is the JSON-serialized `ProblemIR` that Rust would receive. This is useful for debugging and for verifying that your Python objects serialize as expected.
+
+## LLG dynamics parameters
+
+The `DynamicsIR::Llg` section carries three key parameters:
+
+<AccordionGroup>
+  <Accordion title="integrator">
+    Type: string enum. The only currently executable value is `"heun"` (explicit Heun / improved Euler). Future values: `"rk4"`, `"semi_implicit"`, `"adaptive_rkf45"`. Unknown integrator names are rejected by the validator.
+  </Accordion>
+  <Accordion title="fixed_timestep">
+    Type: `Option<f64>`, unit: seconds. `None` means the runner picks `dt` adaptively. A positive value instructs the runner to call the stepper with exactly that `dt` each step. This is a hint for the runner, not a stepper-internal property.
+  </Accordion>
+  <Accordion title="gyromagnetic_ratio">
+    Type: `f64`, unit: m/(A·s). Default: `2.211e5` (Gilbert-form reduced gyromagnetic ratio). This is the γ in the reduced Gilbert-form LLG equation. Must be positive; non-positive values are rejected.
+  </Accordion>
+</AccordionGroup>
+
+## Reproducibility and round-trip
+
+`ProblemMeta` makes every run reproducible: the `source_hash` and `seeds` fields allow the exact same simulation to be reconstructed from the artifact directory without the original script.
+
+UI-authored simulations must be exportable as Python DSL. This is a hard product requirement: if the browser creates or edits a simulation, the resulting `ProblemIR` must be expressible as a canonical, human-editable Python script. Round-trip drift between Python authoring and UI authoring is a product bug.
+
+<Tip>
+The CLI command `fullmag plan script.py` serializes `ProblemIR` and runs the planner without starting execution. Use it to validate IR correctness before committing to a full run.
+</Tip>
+
+## Validation guarantees
+
+Rust-side validation currently guarantees:
+
+- All required sections exist.
+- Names are unique where required (geometry names, material names, magnet names).
+- Magnets reference known regions and materials.
+- Discretization hints are structurally valid.
+- LLG parameters are structurally valid.
+- `backend="hybrid"` requires `mode="hybrid"` and vice versa.
+- Only Python-authored IR is accepted by the bootstrap CLI and PyO3 helper.

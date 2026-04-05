@@ -1,0 +1,465 @@
+---
+title: "Magnetization initialization"
+description: "Set the initial magnetization state of ferromagnets using uniform vectors, seeded random distributions, analytic texture presets, or loaded field data."
+keywords: ["initialization", "magnetization", "m0", "uniform", "random", "texture", "load_magnetization", "save_magnetization", "PresetTexture"]
+---
+
+The initialization API creates `InitialMagnetization` objects that are passed to `Ferromagnet(m0=...)`. Fullmag supports four initialization strategies:
+
+<Columns cols={2}>
+  <Card title="Uniform" icon="arrow-right" href="#uniform">
+    All spins aligned to a single direction.
+  </Card>
+  <Card title="Random" icon="shuffle" href="#random">
+    Deterministic seeded random on the unit sphere.
+  </Card>
+  <Card title="Texture" icon="grip" href="#texture-presets">
+    Analytic preset patterns (vortex, skyrmion, domain wall, …).
+  </Card>
+  <Card title="Loaded" icon="folder-open" href="#loadsave-magnetization">
+    Load a previously saved field from disk.
+  </Card>
+</Columns>
+
+All initializers are available directly on the `fm` namespace and on the `fm.init` sub-module.
+
+---
+
+## uniform()
+
+Create a uniform magnetization initializer. All spins are initialized to the given direction.
+
+```python
+fm.init.uniform((1, 0, 0))       # along +x
+fm.init.uniform(0, 0, 1)         # along +z (positional form)
+fm.uniform((0.707, 0.707, 0.0))  # also available on fm directly
+```
+
+<ParamField path="value_or_x" type="tuple[float, float, float] | float" required>
+  Either a 3-tuple `(x, y, z)` or the x-component when using the three-float positional form.
+</ParamField>
+
+<ParamField path="y" type="float">
+  y-component (positional form only).
+</ParamField>
+
+<ParamField path="z" type="float">
+  z-component (positional form only).
+</ParamField>
+
+**Returns:** `UniformMagnetization`
+
+The vector does not need to be unit-length — the backend normalizes it at runtime.
+
+---
+
+## random()
+
+Create a deterministic seeded random magnetization. Each cell is assigned a uniformly distributed random direction on the unit sphere using a fixed RNG seed.
+
+```python
+fm.init.random(seed=42)
+fm.random(seed=7)
+```
+
+<ParamField path="seed" type="integer" required>
+  Positive integer RNG seed. The same seed always produces the same initial state for the same geometry.
+</ParamField>
+
+**Returns:** `RandomMagnetization`
+
+---
+
+## Texture presets
+
+`fm.texture` is a factory namespace for analytic magnetic texture presets. Each factory method returns a `PresetTexture` object that is evaluated on the sample points of the final mesh or grid at execution time.
+
+```python
+m0 = fm.texture.vortex(circulation=1, core_polarity=1)
+m0 = fm.texture.bloch_skyrmion(radius=30e-9, wall_width=5e-9)
+m0 = fm.texture.domain_wall(kind="neel", width=10e-9, normal_axis="x")
+```
+
+<Note>
+Textures are evaluated lazily on the actual grid or mesh points immediately before the simulation starts. They do not require you to know the sample points in advance.
+</Note>
+
+### Available presets
+
+| Factory method | Description |
+|---|---|
+| `fm.texture.uniform(direction)` | Uniform direction (same as `fm.init.uniform` but as a texture). |
+| `fm.texture.random_seeded(seed)` | Per-point random via deterministic hash. |
+| `fm.texture.vortex(...)` | In-plane vortex with optional out-of-plane core. |
+| `fm.texture.antivortex(...)` | In-plane antivortex. |
+| `fm.texture.bloch_skyrmion(...)` | Bloch-type skyrmion with tanh wall profile. |
+| `fm.texture.neel_skyrmion(...)` | Néel-type skyrmion with tanh wall profile. |
+| `fm.texture.domain_wall(...)` | Bloch or Néel 180° domain wall with tanh profile. |
+| `fm.texture.two_domain(...)` | Two abrupt domains separated at the origin. |
+| `fm.texture.helical(...)` | Helical spin spiral. |
+| `fm.texture.conical(...)` | Conical spin spiral (helical + uniform background). |
+
+### texture.vortex()
+
+```python
+fm.texture.vortex(
+    circulation=1,
+    core_polarity=1,
+    core_radius=None,
+    plane="xy",
+)
+```
+
+<ParamField path="circulation" type="integer" default="1">
+  Winding number. `+1` counter-clockwise, `-1` clockwise.
+</ParamField>
+
+<ParamField path="core_polarity" type="integer" default="1">
+  Out-of-plane core direction. `+1` = mz > 0, `-1` = mz < 0.
+</ParamField>
+
+<ParamField path="core_radius" type="float">
+  Gaussian core radius in metres. When `None`, a point-like core is used.
+</ParamField>
+
+<ParamField path="plane" type="string" default="xy">
+  Vortex plane: `"xy"`, `"xz"`, or `"yz"`.
+</ParamField>
+
+### texture.bloch_skyrmion() / texture.neel_skyrmion()
+
+```python
+fm.texture.bloch_skyrmion(
+    radius=30e-9,
+    wall_width=5e-9,
+    chirality=1,
+    core_polarity=-1,
+    plane="xy",
+)
+```
+
+<ParamField path="radius" type="float" required>
+  Skyrmion radius in metres.
+</ParamField>
+
+<ParamField path="wall_width" type="float" required>
+  Domain wall width in metres (tanh profile parameter).
+</ParamField>
+
+<ParamField path="chirality" type="integer" default="1">
+  Rotation chirality: `+1` or `-1`.
+</ParamField>
+
+<ParamField path="core_polarity" type="integer" default="-1">
+  Core magnetization direction: `-1` = mz < 0 inside, `+1` = mz > 0 inside.
+</ParamField>
+
+<ParamField path="plane" type="string" default="xy">
+  Skyrmion plane.
+</ParamField>
+
+### texture.domain_wall()
+
+```python
+fm.texture.domain_wall(
+    kind="neel",
+    width=10e-9,
+    center_offset=0.0,
+    normal_axis="x",
+    left=(1.0, 0.0, 0.0),
+    right=(-1.0, 0.0, 0.0),
+)
+```
+
+<ParamField path="kind" type="string" default="neel">
+  Wall type: `"neel"` or `"bloch"`.
+</ParamField>
+
+<ParamField path="width" type="float" required>
+  Wall width in metres (tanh profile parameter).
+</ParamField>
+
+<ParamField path="center_offset" type="float" default="0.0">
+  Wall centre displacement along `normal_axis` in metres.
+</ParamField>
+
+<ParamField path="normal_axis" type="string" default="x">
+  Axis perpendicular to the wall plane: `"x"`, `"y"`, or `"z"`.
+</ParamField>
+
+<ParamField path="left" type="tuple[float, float, float]" default="(1, 0, 0)">
+  Magnetization direction left of the wall.
+</ParamField>
+
+<ParamField path="right" type="tuple[float, float, float]" default="(-1, 0, 0)">
+  Magnetization direction right of the wall.
+</ParamField>
+
+### texture.helical()
+
+```python
+fm.texture.helical(
+    wavevector=(1e8, 0, 0),
+    e1=(1.0, 0.0, 0.0),
+    e2=(0.0, 1.0, 0.0),
+    phase_rad=0.0,
+)
+```
+
+<ParamField path="wavevector" type="tuple[float, float, float]" required>
+  Spin-spiral wavevector in rad/m.
+</ParamField>
+
+<ParamField path="e1" type="tuple[float, float, float]" default="(1, 0, 0)">
+  First rotation axis of the spiral plane.
+</ParamField>
+
+<ParamField path="e2" type="tuple[float, float, float]" default="(0, 1, 0)">
+  Second rotation axis of the spiral plane (perpendicular to `e1`).
+</ParamField>
+
+<ParamField path="phase_rad" type="float" default="0.0">
+  Initial phase offset in radians.
+</ParamField>
+
+---
+
+## Texture transforms
+
+`PresetTexture` objects support fluent spatial transforms that are applied to the evaluation points before the analytic formula runs.
+
+```python
+m0 = (
+    fm.texture.vortex(circulation=1)
+    .translate(50e-9, 0, 0)
+    .rotate_z_deg(45.0)
+    .scale(2.0, 2.0, 1.0)
+)
+```
+
+| Method | Effect |
+|---|---|
+| `.translate(dx, dy, dz)` | Shift evaluation origin. |
+| `.rotate_x(angle_rad)` | Rotate around x-axis. |
+| `.rotate_y(angle_rad)` | Rotate around y-axis. |
+| `.rotate_z(angle_rad)` | Rotate around z-axis. |
+| `.rotate_x_deg(angle_deg)` | Rotate around x-axis in degrees. |
+| `.rotate_y_deg(angle_deg)` | Rotate around y-axis in degrees. |
+| `.rotate_z_deg(angle_deg)` | Rotate around z-axis in degrees. |
+| `.scale(sx, sy, sz)` | Scale evaluation coordinates. |
+| `.with_mapping(space=, projection=, clamp_mode=)` | Set coordinate mapping policy. |
+
+---
+
+## TextureMapping
+
+Controls how evaluation coordinates are transformed before the preset formula is applied.
+
+```python
+fm.TextureMapping(
+    space="object",
+    projection="object_local",
+    clamp_mode="clamp",
+)
+```
+
+<ParamField path="space" type="string" default="object">
+  Coordinate space: `"object"` (local object frame) or `"world"` (global frame).
+</ParamField>
+
+<ParamField path="projection" type="string" default="object_local">
+  Projection mode used by the backend evaluator.
+</ParamField>
+
+<ParamField path="clamp_mode" type="string" default="clamp">
+  Boundary behavior outside the object extents: `"clamp"`, `"repeat"`, or `"mirror"`.
+</ParamField>
+
+---
+
+## evaluate_preset_texture()
+
+Evaluate a named texture preset at a list of sample points. Returns an `EvaluatedTexture` containing the per-point magnetization vectors.
+
+```python
+from fullmag import evaluate_preset_texture
+
+result = evaluate_preset_texture(
+    preset_kind="vortex",
+    params={"circulation": 1, "core_polarity": 1, "plane": "xy"},
+    points=[[0, 0, 0], [10e-9, 0, 0], [0, 10e-9, 0]],
+)
+print(result.values)  # list of (mx, my, mz) tuples, all unit-normalized
+```
+
+<ParamField path="preset_kind" type="string" required>
+  Preset name: `"uniform"`, `"random_seeded"`, `"vortex"`, `"antivortex"`, `"bloch_skyrmion"`, `"neel_skyrmion"`, `"domain_wall"`, `"two_domain"`, `"helical"`, `"conical"`.
+</ParamField>
+
+<ParamField path="params" type="Mapping[str, object]" required>
+  Preset-specific parameters (same keys as the corresponding `texture.*()` factory arguments).
+</ParamField>
+
+<ParamField path="points" type="Iterable[Sequence[float]]" required>
+  List of 3D sample points in metres.
+</ParamField>
+
+**Returns:** `EvaluatedTexture` with a `.values` list of `(mx, my, mz)` unit-normalized tuples.
+
+---
+
+## load_magnetization() / save_magnetization()
+
+Load or save a magnetization field to or from disk. Supported formats are JSON, Zarr, and HDF5.
+
+### load_magnetization()
+
+```python
+state = fm.load_magnetization("output/final_m.zarr")
+state = fm.load_magnetization("output/snapshot.h5", dataset="m", sample=-1)
+```
+
+<ParamField path="path" type="string | Path" required>
+  Path to the magnetization file or Zarr directory.
+</ParamField>
+
+<ParamField path="format" type="string" default="auto">
+  File format: `"json"`, `"zarr"`, `"h5"`, or `"auto"` (infer from extension).
+</ParamField>
+
+<ParamField path="dataset" type="string">
+  Dataset key within the file (Zarr/HDF5 only). When `None`, the first suitable dataset is located automatically.
+</ParamField>
+
+<ParamField path="sample" type="integer" default="-1">
+  Time-sample index to load from a `[T, N, 3]` array. `-1` loads the last sample.
+</ParamField>
+
+**Returns:** `SampledMagnetization` — usable directly as `Ferromagnet(m0=...)`.
+
+### save_magnetization()
+
+```python
+fm.save_magnetization("output/final_m.zarr", values)
+fm.save_magnetization("output/final_m.h5", state, format="h5", dataset="values")
+```
+
+<ParamField path="path" type="string | Path" required>
+  Destination file path.
+</ParamField>
+
+<ParamField path="values" type="Sequence[Sequence[float]] | SampledMagnetization" required>
+  Magnetization data as a sequence of `[mx, my, mz]` triples or an existing `SampledMagnetization`.
+</ParamField>
+
+<ParamField path="format" type="string" default="auto">
+  Output format: `"json"`, `"zarr"`, `"h5"`, or `"auto"`.
+</ParamField>
+
+<ParamField path="dataset" type="string" default="values">
+  Dataset key for Zarr and HDF5 output.
+</ParamField>
+
+**Returns:** `Path` to the written file.
+
+---
+
+## infer_magnetization_state_format()
+
+Detect the serialization format of a magnetization file from its path and extension.
+
+```python
+fmt = fm.infer_magnetization_state_format("output/final_m.zarr")
+# "zarr"
+```
+
+<ParamField path="path" type="string | Path" required>
+  Path to inspect.
+</ParamField>
+
+**Returns:** `str` — one of `"json"`, `"zarr"`, `"h5"`.
+
+---
+
+## MAGNETIZATION_STATE_FORMATS
+
+Tuple of all supported serialization format identifiers.
+
+```python
+fm.MAGNETIZATION_STATE_FORMATS
+# ("json", "zarr", "h5")
+```
+
+---
+
+## Complete examples
+
+### Random initial state with relaxation
+
+```python
+import fullmag as fm
+
+strip  = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+mat    = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+magnet = fm.Ferromagnet(
+    name="strip",
+    geometry=strip,
+    material=mat,
+    m0=fm.init.random(seed=42),   # deterministic random
+)
+```
+
+### Domain wall initialization
+
+```python
+magnet = fm.Ferromagnet(
+    name="track",
+    geometry=fm.Box(size=(200e-9, 20e-9, 5e-9), name="track"),
+    material=mat,
+    m0=fm.texture.domain_wall(
+        kind="neel",
+        width=8e-9,
+        normal_axis="x",
+        left=(1.0, 0.0, 0.0),
+        right=(-1.0, 0.0, 0.0),
+    ),
+)
+```
+
+### Loading a previously relaxed state
+
+```python
+# Run relaxation and save the final state
+result = fm.Simulation(problem, backend="fdm").run(until=2e-9)
+result.save_state("checkpoints/relaxed.zarr")
+
+# Reload as initial condition for the next run
+saved_state = fm.load_magnetization("checkpoints/relaxed.zarr")
+magnet_restarted = fm.Ferromagnet(
+    name="strip",
+    geometry=strip,
+    material=mat,
+    m0=saved_state,
+)
+```
+
+### Evaluating a texture manually
+
+```python
+import fullmag as fm
+
+sample_points = [[x * 5e-9, 0, 0] for x in range(20)]
+evaluated = fm.evaluate_preset_texture(
+    preset_kind="domain_wall",
+    params={
+        "kind": "neel",
+        "width": 10e-9,
+        "normal_axis": "x",
+        "left": [1.0, 0.0, 0.0],
+        "right": [-1.0, 0.0, 0.0],
+    },
+    points=sample_points,
+)
+for point, m in zip(sample_points, evaluated.values):
+    print(f"x={point[0]*1e9:.1f} nm → m={m}")
+```

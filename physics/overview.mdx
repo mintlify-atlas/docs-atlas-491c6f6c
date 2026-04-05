@@ -1,0 +1,122 @@
+---
+title: "Physics overview"
+description: "Micromagnetics in Fullmag: governing equations, energy terms, and capability tiers."
+---
+
+Fullmag is a micromagnetics platform. Micromagnetics is a continuum field theory for magnetic
+materials. Instead of tracking individual atomic spins, it represents the magnetization as a smooth
+vector field `M(x, t)` that varies continuously in space and time. This approximation is valid when
+the length scale of interest is much larger than the lattice constant but the domain structure is
+still spatially resolved.
+
+The state variable is the **reduced magnetization**
+
+```
+m(x, t) = M(x, t) / Ms,    |m| = 1
+```
+
+where `Ms` is the saturation magnetization in A/m. The unit-length constraint holds pointwise: the
+magnitude of `m` is always 1; only its direction evolves.
+
+## The Landau-Lifshitz-Gilbert equation
+
+All time-domain dynamics in Fullmag are governed by the **Landau-Lifshitz-Gilbert (LLG) equation**
+in its Gilbert form:
+
+```
+dm/dt = -γ/(1+α²) [ m × H_eff  +  α m × (m × H_eff) ]
+```
+
+The first term is **precession**: `m` orbits around the effective field. The second term is
+**damping**: `m` spirals toward alignment with `H_eff`. At equilibrium both terms vanish and
+`m ∥ H_eff`.
+
+<Info>
+The effective field `H_eff` is the variational derivative of the total energy functional with
+respect to the magnetization. Each energy term contributes an additive field contribution. Adding
+a new physics term means adding a new contribution to `H_eff`.
+</Info>
+
+### Parameters
+
+| Symbol | Name | SI unit |
+|--------|------|---------|
+| `m` | Reduced magnetization | dimensionless |
+| `Ms` | Saturation magnetization | A/m |
+| `γ` | Gyromagnetic ratio | m/(A·s) |
+| `α` | Gilbert damping | dimensionless |
+| `H_eff` | Effective field | A/m |
+| `t` | Time | s |
+
+## Energy terms
+
+`H_eff` is the sum of contributions from all active energy terms:
+
+```
+H_eff = H_ex + H_demag + H_ext + H_iDMI + H_bDMI + ...
+```
+
+Each term is defined by a continuum energy functional and a corresponding variational derivative.
+The table below lists every energy term in Fullmag and its current capability tier.
+
+### Capability tiers
+
+Fullmag separates three implementation depths for every feature:
+
+| Tier | Meaning |
+|------|---------|
+| **public-executable** | Fully wired end-to-end: `Simulation.run()` → plan → runner → engine → artifacts. |
+| **semantic-only** | Legal in Python API and `ProblemIR`. Can be authored, serialized, validated, and planned. Not yet numerically executed. |
+| **internal-reference** | Numerically implemented inside an engine crate as a trusted baseline, but not yet wired to the public run path. |
+
+This separation prevents the public API from silently implying more execution capability than
+actually exists. See [Capability tiers](/concepts/capability-tiers) for the full matrix.
+
+### Energy terms and status
+
+| Energy term | Python API | FDM status | FEM status | Notes |
+|-------------|-----------|------------|------------|-------|
+| Exchange | `fm.Exchange()` | public-executable | public-executable | 6-point stencil (FDM); lumped-mass P1 (FEM) |
+| Demag | `fm.Demag()` | public-executable | public-executable | Newell tensor FFT (FDM); bootstrap transfer-grid seam (FEM) |
+| Zeeman | `fm.Zeeman(B=...)` | public-executable | public-executable | Public API takes B in T; planner normalizes to H in A/m |
+| InterfacialDMI | `fm.InterfacialDMI(D=...)` | semantic-only | semantic-only | Planned for FDM; physics note frozen |
+| BulkDMI | `fm.BulkDMI(D=...)` | semantic-only | semantic-only | Planned for FDM; physics note frozen |
+| UniaxialAnisotropy | `fm.UniaxialAnisotropy(...)` | semantic-only | semantic-only | Ku1 and anisU in IR; not yet executed |
+| CubicAnisotropy | `fm.CubicAnisotropy(...)` | semantic-only | semantic-only | Deferred |
+| Magnetoelastic | `fm.Magnetoelastic(...)` | internal-reference | semantic-only | Small-strain B1/B2; prescribed-strain H_mel wired into H_eff |
+
+## Studies
+
+A **study** defines what the solver does with the assembled `H_eff`. Fullmag supports two study
+types:
+
+- **`TimeEvolution`** — integrates the LLG equation forward in time using the Heun integrator.
+- **`Relaxation`** — finds a local energy minimum without physical time integration. Three
+  algorithms are available: `llg_overdamped`, `projected_gradient_bb`, and `nonlinear_cg`.
+
+## Physics-first documentation standard
+
+Every physics or numerics feature in Fullmag must have a corresponding note in `docs/physics/`
+before implementation begins. That note must describe the governing equations, SI units, FDM and
+FEM interpretations, Python API impact, and validation strategy.
+
+This documentation is the canonical reference for human contributors and AI coding agents working
+on the platform.
+
+<CardGroup cols={2}>
+  <Card title="LLG dynamics" href="/physics/llg-dynamics">
+    The Landau-Lifshitz-Gilbert equation, the Heun integrator, and TimeEvolution usage.
+  </Card>
+  <Card title="Exchange, demag, and Zeeman" href="/physics/exchange-demag-zeeman">
+    The three core executable energy terms with discrete formulas and code examples.
+  </Card>
+  <Card title="Relaxation algorithms" href="/physics/relaxation">
+    Energy minimization without time integration: overdamped LLG, BB, and nonlinear CG.
+  </Card>
+  <Card title="DMI and anisotropy" href="/physics/dmi-anisotropy">
+    Interfacial and bulk DMI, uniaxial anisotropy, and what semantic-only means.
+  </Card>
+  <Card title="FEM and MFEM GPU backend" href="/physics/fem-mfem-gpu">
+    The MFEM + libCEED + hypre FEM architecture, mesh hierarchy, and capability status.
+  </Card>
+</CardGroup>

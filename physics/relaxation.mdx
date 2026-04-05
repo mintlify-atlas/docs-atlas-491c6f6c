@@ -1,0 +1,286 @@
+---
+title: "Relaxation algorithms"
+description: "Energy minimization without time-domain LLG: overdamped LLG, Barzilai-Borwein projected gradient, and Polak-Ribière+ nonlinear CG."
+---
+
+Relaxation finds a local energy minimum of the micromagnetic energy functional without integrating
+the LLG equation as a physical time-domain trajectory. It is useful for computing equilibrium
+states, preparing initial conditions, and studying energy landscapes.
+
+The goal is to satisfy the **zero-torque equilibrium condition**:
+
+```
+m_i × H_eff,i = 0    for all active cells i
+```
+
+subject to the pointwise unit-length constraint `|m_i| = 1`. At any stationary point the
+magnetization is parallel to the effective field at every cell.
+
+## Mathematical setup
+
+### Constrained minimization
+
+Relaxation seeks a local minimizer of the total energy on the product of unit spheres:
+
+```
+min_{m ∈ (S²)^N}  E[m]  =  E_ex[m] + E_demag[m] + E_ext[m] + ...
+```
+
+where `N` is the number of active cells and `(S²)^N` is the sphere product manifold.
+
+### Tangent-space gradient and torque
+
+The **tangent-space gradient** at cell `i` is the projection of the negative effective field
+onto the tangent plane of the sphere at `m_i`:
+
+```
+g_i = -(H_eff,i - (m_i · H_eff,i) m_i)
+    = -P_{m_i} H_eff,i
+```
+
+where `P_{m_i} = I - m_i m_i^T` is the orthogonal projector onto the tangent plane. This is the
+Riemannian gradient of `E` on the sphere manifold.
+
+The **torque residual** is `τ_i = m_i × H_eff,i`. The maximum torque over all cells,
+
+```
+τ_max = max_i |m_i × H_eff,i|        (A/m)
+```
+
+is the primary convergence indicator. At a stationary point `τ_max = 0`.
+
+### Retraction
+
+All three algorithms require mapping a tangent vector back to the sphere. Fullmag uses
+**cellwise normalization** (first-order retraction):
+
+```
+R_{m_i}(v_i) = (m_i + v_i) / |m_i + v_i|
+```
+
+---
+
+## Algorithm A: llg_overdamped
+
+The `llg_overdamped` algorithm reuses the LLG time-integration pipeline but **disables the
+precession term**, leaving only the pure-damping term:
+
+```
+dm/dt = -γ/(1+α²) [ α m × (m × H_eff) ]
+```
+
+This removes the orbiting behavior of physical LLG and makes the evolution a monotone energy
+descent. The material damping `α` still scales the descent rate, but users do not need to
+artificially inflate `α` to suppress precession.
+
+**Convergence check**: the runner monitors the maximum torque estimated from the RHS norm:
+
+```
+τ_max ≈ (1+α²)/(γα) · max_i |dm_i/dt|
+```
+
+**Stop criteria**:
+1. `τ_max ≤ ε_τ` (torque tolerance)
+2. Optionally `|E_n - E_{n-1}| ≤ ε_E` (energy tolerance)
+3. Hard cap on iteration count
+
+<Note>
+The `llg_overdamped` path uses the runner's pseudo-time and output cadence. Reported simulation
+time is an execution-control quantity rather than a physically meaningful evolution time.
+</Note>
+
+---
+
+## Algorithm B: projected_gradient_bb
+
+The `projected_gradient_bb` algorithm performs **steepest descent on the sphere manifold** with
+adaptive step sizes selected by the Barzilai-Borwein (BB) method.
+
+<Steps>
+  <Step title="Compute effective field and tangent gradient">
+    Assemble `H_eff = H_ex + H_demag + H_ext` and compute the tangent gradient
+    `g_i = -P_{m_i} H_eff,i`.
+  </Step>
+  <Step title="Check convergence">
+    Stop if `τ_max ≤ ε_τ`. Also check `|g|² < 1e-30` as a gradient-floor guard.
+  </Step>
+  <Step title="Armijo backtracking line search">
+    Starting from a trial step `λ`, find the largest `λ_k` such that:
+
+    `E[R_m(-λ_k g)] ≤ E[m] - c₁ λ_k |g|²`
+
+    where `c₁ = 1e-4` (Armijo parameter). If the condition fails, halve `λ_k` (up to 20
+    backtracks).
+  </Step>
+  <Step title="Accept step">
+    Update `m^{n+1} = R_{m^n}(-λ_k g^n)`.
+  </Step>
+  <Step title="Compute BB step size for next iteration">
+    Form the secant pairs `s_n = m^{n+1} - m^n` and `y_n = g^{n+1} - g^n`.
+
+    Two BB formulas are alternated between odd and even iterations:
+
+    `λ_BB1 = ⟨s_n, s_n⟩ / ⟨s_n, y_n⟩`
+
+    `λ_BB2 = ⟨s_n, y_n⟩ / ⟨y_n, y_n⟩`
+
+    Each is accepted only when the denominator has the correct sign. If both fail, a reset
+    mechanism activates and ramps the step from a minimum value. All BB steps are clamped to
+    `[1e-15, 1e-3]`.
+  </Step>
+</Steps>
+
+---
+
+## Algorithm C: nonlinear_cg
+
+The `nonlinear_cg` algorithm uses **Polak-Ribière+ conjugate gradient** on the sphere manifold.
+Conjugate directions reuse curvature information from previous steps, giving superlinear
+convergence near minima compared to steepest descent.
+
+<Steps>
+  <Step title="Compute tangent gradient">
+    Compute `g_n` as in Algorithm B.
+  </Step>
+  <Step title="Check convergence">
+    Stop if `τ_max ≤ ε_τ` or `|g|² < 1e-30`.
+  </Step>
+  <Step title="Ensure descent direction">
+    If `⟨p_n, g_n⟩ ≥ 0`, reset to steepest descent: `p_n ← -g_n`.
+  </Step>
+  <Step title="Armijo backtracking line search">
+    Find the largest `λ` satisfying the sufficient decrease condition along `p_n`. Up to 30
+    backtracks with `c₁ = 1e-4`.
+  </Step>
+  <Step title="Compute new gradient">
+    Evaluate `g_{n+1}` at the accepted point.
+  </Step>
+  <Step title="Vector transport">
+    Transport the old gradient and search direction to the tangent space at `m^{n+1}` via
+    orthogonal projection:
+
+    `T_{n→n+1} v = v - (m^{n+1} · v) m^{n+1}`
+  </Step>
+  <Step title="Polak-Ribière+ update coefficient">
+    ```
+    β_{n+1} = max(0, ⟨g_{n+1}, g_{n+1} - T_{n→n+1} g_n⟩ / ⟨g_n, g_n⟩)
+    ```
+    The `max(0, ·)` clamp provides automatic restart when conjugacy is lost.
+  </Step>
+  <Step title="Periodic restart">
+    Every 50 iterations, force `β = 0` (steepest descent restart) to prevent accumulation of
+    rounding errors in the search direction.
+  </Step>
+  <Step title="New search direction">
+    `p_{n+1} = -g_{n+1} + β_{n+1} T_{n→n+1} p_n`
+  </Step>
+</Steps>
+
+---
+
+## Python API
+
+```python
+fm.Relaxation(
+    algorithm="projected_gradient_bb",   # or "llg_overdamped", "nonlinear_cg"
+    torque_tolerance=1e-4,               # A/m
+    energy_tolerance=1e-10,              # J (optional)
+    max_steps=50000,
+    dynamics=fm.LLG(fixed_timestep=1e-13),
+    outputs=[
+        fm.SaveField("m", every=100e-12),
+        fm.SaveScalar("E_ex", every=10e-12),
+    ],
+)
+```
+
+Available `algorithm` strings:
+
+| String | Algorithm | FDM | FEM |
+|--------|-----------|-----|-----|
+| `"llg_overdamped"` | Algorithm A: damped LLG | public-executable | public-executable |
+| `"projected_gradient_bb"` | Algorithm B: BB steepest descent | public-executable | planned |
+| `"nonlinear_cg"` | Algorithm C: Polak-Ribière+ CG | public-executable | planned |
+| `"tangent_plane_implicit"` | FEM-specific implicit method | semantic-only | semantic-only |
+
+### Convergence criteria
+
+| Criterion | Formula | Required | Default |
+|-----------|---------|----------|---------|
+| Torque tolerance | `τ_max ≤ ε_τ` | Yes | `1e-4` A/m |
+| Energy tolerance | `|E_n - E_{n-1}| ≤ ε_E` | Optional | None |
+| Max iterations | `n ≥ n_max` | Yes | 50000 |
+
+---
+
+## Complete example
+
+```python
+import fullmag as fm
+
+def build() -> fm.Problem:
+    strip = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+    mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+    magnet = fm.Ferromagnet(
+        name="strip",
+        geometry=strip,
+        material=mat,
+        m0=fm.init.random(seed=42),
+    )
+
+    return fm.Problem(
+        name="exchange_relax",
+        magnets=[magnet],
+        energy=[fm.Exchange()],
+        study=fm.Relaxation(
+            algorithm="llg_overdamped",
+            torque_tolerance=5e-2,
+            energy_tolerance=1e-21,
+            max_steps=50_000,
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=100e-12),
+                fm.SaveField("H_ex", every=100e-12),
+                fm.SaveScalar("E_ex", every=10e-12),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9)),
+        ),
+    )
+
+if __name__ == "__main__":
+    problem = build()
+    result = fm.Simulation(problem, backend="fdm").run(until=2e-9)
+    print(f"Status: {result.status}")
+    if result.steps:
+        print(f"Total steps: {len(result.steps)}")
+        print(f"Final E_ex: {result.steps[-1].e_ex:.6e} J")
+```
+
+Run with:
+
+```bash
+fullmag examples/exchange_relax.py
+```
+
+---
+
+## Algorithm comparison
+
+| Aspect | llg_overdamped | projected_gradient_bb | nonlinear_cg |
+|--------|---------------|----------------------|--------------|
+| Cost per step | 1 field eval | 1–2 field evals | 2 field evals |
+| Line search | No (fixed dt) | Armijo backtracking | Armijo backtracking |
+| Convergence order | First (gradient descent) | Superlinear (quasi-Newton) | Superlinear |
+| Memory overhead | None | O(N) | O(N) |
+| GPU implementation | Yes (via LLG pipeline) | CPU only (current) | CPU only (current) |
+
+At scale, NCG requires fewer field evaluations than BB, which requires fewer than overdamped LLG.
+The dominant cost in all three algorithms is the demagnetization FFT.
+
+<Note>
+All three algorithms must converge to the same equilibrium (within tolerance) from the same
+initial state. This is verified in the regression test suite
+(`all_algorithms_converge_to_similar_equilibrium`).
+</Note>

@@ -1,80 +1,267 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Run your first Fullmag micromagnetics simulation in four steps."
 ---
 
-## Get started in three steps
+<Warning>
+Fullmag requires Python 3.10 or later and Rust nightly. The CLI build step requires Cargo to be on your PATH. See [Installation](/installation) for full prerequisites.
+</Warning>
 
-Get your documentation site running locally and make your first customization.
+<Steps>
 
-### Step 1: Set up your local environment
+<Step title="Install the Python package">
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+Create a virtual environment and install `fullmag-py` with optional meshing dependencies:
 
-### Step 2: Deploy your changes
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e 'packages/fullmag-py[meshing]'
+```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+The `[meshing]` extra adds `gmsh`, `meshio`, `scipy`, and `trimesh` for FEM geometry workflows. For FDM-only use, you can omit it:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+```bash
+pip install -e packages/fullmag-py
+```
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Verify the install:
 
-### Step 3: Go live
+```bash
+python -c "import fullmag; print('fullmag ready')"
+```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+</Step>
+
+<Step title="Build and install the CLI launcher">
+
+The `fullmag` CLI is a Rust binary that hosts script execution, IR validation, planning, and session bootstrap.
+
+<Tabs>
+  <Tab title="just (recommended)">
+    ```bash
+    just build fullmag
+    export PATH="$PWD/.fullmag/local/bin:$PATH"
+    fullmag --help
+    ```
+  </Tab>
+  <Tab title="make">
+    ```bash
+    make install-cli
+    export PATH="$PWD/.fullmag/local/bin:$PATH"
+    fullmag --help
+    ```
+  </Tab>
+  <Tab title="Dev container">
+    ```bash
+    make up
+    make shell
+    # Inside the container:
+    cargo build -p fullmag-cli --bin fullmag
+    ```
+  </Tab>
+</Tabs>
+
+<Note>
+`just build fullmag` automatically detects CUDA (`nvcc`) and CMake on your PATH and enables the CUDA backend if both are available. The resolved build mode is written to `.fullmag/local/launcher-build-mode` after the build.
+</Note>
+
+</Step>
+
+<Step title="Write and run your first simulation">
+
+The simplest executable problem is an exchange-only relaxation on a nanomagnetic strip. This is the canonical example from `examples/exchange_relax.py`:
+
+```python
+import fullmag as fm
+
+
+def build() -> fm.Problem:
+    strip = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+    mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+    magnet = fm.Ferromagnet(
+        name="strip",
+        geometry=strip,
+        material=mat,
+        m0=fm.init.random(seed=42),
+    )
+
+    return fm.Problem(
+        name="exchange_relax",
+        magnets=[magnet],
+        energy=[fm.Exchange()],
+        study=fm.Relaxation(
+            algorithm="llg_overdamped",
+            torque_tolerance=5e-2,
+            energy_tolerance=1e-21,
+            max_steps=50_000,
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=100e-12),
+                fm.SaveField("H_ex", every=100e-12),
+                fm.SaveScalar("E_ex", every=10e-12),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9)),
+        ),
+    )
+
+
+problem = build()
+result = fm.Simulation(problem, backend="fdm").run(until=2e-9)
+
+print(f"Status: {result.status}")
+if result.steps:
+    print(f"Total steps: {len(result.steps)}")
+    print(f"Final E_ex: {result.steps[-1].e_ex:.6e} J")
+    print(f"Final time: {result.steps[-1].time:.6e} s")
+if result.output_dir:
+    print(f"Artifacts written to: {result.output_dir}")
+for note in result.notes:
+    print(f"  Note: {note}")
+```
+
+Run it via the CLI:
+
+```bash
+fullmag examples/exchange_relax.py
+```
+
+Or run it directly with Python (bypasses the Rust host):
+
+```bash
+python examples/exchange_relax.py
+```
+
+**Expected output:**
+
+```
+Status: ok
+Total steps: 412
+Final E_ex: 8.341200e-19 J
+Final time: 2.000000e-09 s
+Artifacts written to: .fullmag/local-live/exchange_relax/
+```
+
+<Note>
+Step counts and energy values depend on convergence. `status: ok` confirms the run completed without errors.
+</Note>
+
+To validate the `ProblemIR` without executing, pass `--json`:
+
+```bash
+fullmag examples/exchange_relax.py --json
+```
+
+**Adding Demag and Zeeman**
+
+The `examples/exchange_demag_zeeman.py` example extends the baseline with a demagnetization field and a uniform external field:
+
+```python
+import fullmag as fm
+
+film = fm.Box(size=(128e-9, 64e-9, 4e-9), name="film")
+mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+magnet = fm.Ferromagnet(
+    name="film",
+    geometry=film,
+    material=mat,
+    m0=fm.init.random(seed=7),
+)
+
+problem = fm.Problem(
+    name="exchange_demag_zeeman",
+    magnets=[magnet],
+    energy=[
+        fm.Exchange(),
+        fm.Demag(),
+        fm.Zeeman(B=(0.0, 0.0, 0.05)),
+    ],
+    study=fm.TimeEvolution(
+        dynamics=fm.LLG(fixed_timestep=1e-13),
+        outputs=[
+            fm.SaveField("m", every=50e-12),
+            fm.SaveField("H_ex", every=50e-12),
+            fm.SaveField("H_demag", every=50e-12),
+            fm.SaveField("H_ext", every=50e-12),
+            fm.SaveField("H_eff", every=50e-12),
+            fm.SaveScalar("E_ex", every=10e-12),
+            fm.SaveScalar("E_demag", every=10e-12),
+            fm.SaveScalar("E_ext", every=10e-12),
+            fm.SaveScalar("E_total", every=10e-12),
+            fm.SaveScalar("max_h_eff", every=10e-12),
+        ],
+    ),
+    discretization=fm.DiscretizationHints(
+        fdm=fm.FDM(cell=(4e-9, 4e-9, 4e-9)),
+    ),
+)
+
+result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+
+print(f"Status: {result.status}")
+if result.steps:
+    final = result.steps[-1]
+    print(f"Total steps: {len(result.steps)}")
+    print(f"Final E_ex:    {final.e_ex:.6e} J")
+    print(f"Final E_demag: {final.e_demag:.6e} J")
+    print(f"Final E_ext:   {final.e_ext:.6e} J")
+    print(f"Final E_total: {final.e_total:.6e} J")
+    print(f"Final time:    {final.time:.6e} s")
+```
+
+```bash
+fullmag examples/exchange_demag_zeeman.py
+```
+
+</Step>
+
+<Step title="Open the control room">
+
+By default, `fullmag script.py` opens the browser to the local control room at `http://localhost:3000` after starting a run. Live vector field previews are streamed as binary WebSocket frames via `/ws/live/current`.
+
+Start the control room manually:
+
+```bash
+./scripts/dev-control-room.sh
+# or for a specific completed session:
+./scripts/dev-control-room.sh session-1234567890-12345
+# or via just:
+just control-room
+```
+
+This starts:
+
+- `fullmag-api` on `http://localhost:8080`
+- the Next.js control room on `http://localhost:3000`
+
+The browser targets the singleton local workspace at `/`.
+
+**Useful CLI flags:**
+
+```bash
+# Suppress browser launch
+fullmag examples/exchange_relax.py --headless
+
+# Keep CLI open after the run completes
+fullmag -i examples/exchange_relax.py
+
+# Stop stale control-room processes
+make control-room-stop
+```
+
+</Step>
+
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Installation" href="/installation">
+    Full setup options: Docker dev container, CUDA build, FEM GPU runtime.
+  </Card>
+  <Card title="Introduction" href="/introduction">
+    Architecture overview, executable physics, and the core contract.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

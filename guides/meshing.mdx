@@ -1,0 +1,215 @@
+---
+title: "Meshing"
+description: "FEM mesh architecture, mesh generation options, imported geometries, and the three-level mesh separation invariant."
+---
+
+FEM meshing in Fullmag is governed by a three-level architecture that keeps the Universe domain, individual magnetic objects, and the final solver mesh as independent, tunable entities.
+
+---
+
+## Three-level mesh architecture
+
+Fullmag models FEM meshing on three distinct levels. This structure is non-negotiable.
+
+| Level | What it is |
+|---|---|
+| **Universe mesh config** | Study-level meshing policy for the air/domain region surrounding magnetic bodies |
+| **Per-object mesh config** | Independent meshing policy for each ferromagnetic object |
+| **Final shared-domain solver mesh** | One conforming tetrahedral mesh assembled from Universe + all objects |
+
+This separation exists because:
+
+- Users must be able to inspect and tune the mesh of `Universe` and of each object separately
+- The air/domain region is expected to use a coarser target mesh than the magnetic bodies and their interfaces
+- The final solver path must still consume **one** conforming shared-domain mesh
+- UI visibility, isolate mode, and mesh preview scope are rendering concerns only — they must never change solver physics or remove domains from the actual FEM problem
+
+<Warning>
+  Any refactor that collapses `Universe mesh`, `Object mesh`, and `Final solver mesh` back into one anonymous mesh blob is an **architectural regression**. `Universe` is not "just another object" — it is the solver domain. Changes of this kind break the physical solver contract and must be reverted.
+</Warning>
+
+---
+
+## Installing meshing extras
+
+The meshing subsystem requires optional dependencies not included in the base `fullmag` package:
+
+```bash
+pip install 'fullmag[meshing]'
+```
+
+This pulls in:
+- `gmsh >= 4.12` — tetrahedral mesh generation
+- `meshio >= 5.3` — reading pre-generated mesh files
+- `scipy` — spatial algorithms used in mesh processing
+- `trimesh` — surface asset handling
+
+---
+
+## FEM hints in DiscretizationHints
+
+FEM meshing is controlled through `fm.FEM(...)` inside `DiscretizationHints`:
+
+```python
+fm.DiscretizationHints(
+    fem=fm.FEM(
+        mesh=None,    # None = auto-generate from geometry; or path to .msh file
+        hmax=2e-9,    # maximum element size in metres
+        order=1,      # element order: 1 = linear P1, 2 = quadratic
+    )
+)
+```
+
+When `mesh=None`, the planner builds a `FemPlanIR` and generates a mesh from the geometry during the planning step, using the `hmax` and `order` hints.
+
+---
+
+## Generating meshes programmatically
+
+Use `fm.generate_mesh()` to produce a `MeshData` object directly from a geometry descriptor:
+
+```python
+import fullmag as fm
+
+geom = fm.Box(size=(200e-9, 50e-9, 10e-9), name="strip")
+
+mesh = fm.generate_mesh(
+    geometry=geom,
+    hmax=4e-9,
+    order=1,
+)
+
+print(f"Nodes: {mesh.n_nodes}")
+print(f"Elements: {mesh.n_elements}")
+print(f"Boundary faces: {mesh.n_boundary_faces}")
+```
+
+---
+
+## MeshOptions
+
+Advanced mesh generation options are passed via `MeshOptions`:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `hmin` | `float \| None` | `None` | Minimum element size (SI metres) |
+| `algorithm_2d` | `int` | Frontal-Delaunay (6) | 2D meshing algorithm |
+| `algorithm_3d` | `int` | Delaunay (1) | 3D meshing algorithm |
+| `size_preset` | `str \| None` | `None` | Preset: `"coarse"`, `"normal"`, `"fine"`, `"finer"`, `"extra_fine"` |
+| `size_factor` | `float` | `1.0` | Global size scale factor |
+| `curvature_factor` | `float \| None` | `None` | Curvature-based refinement strength |
+| `growth_rate` | `float \| None` | `None` | Element growth ratio away from surfaces |
+| `optimize` | `str \| None` | `None` | Post-mesh optimizer name |
+| `compute_quality` | `bool` | `False` | Compute SICN/gamma quality metrics after meshing |
+
+```python
+import fullmag as fm
+
+opts = fm.MeshOptions(
+    size_preset="fine",
+    compute_quality=True,
+)
+
+mesh = fm.generate_mesh(
+    geometry=fm.Box(size=(200e-9, 50e-9, 10e-9)),
+    hmax=3e-9,
+    order=1,
+    options=opts,
+)
+
+if mesh.quality:
+    print(f"SICN min: {mesh.quality.sicn_min:.4f}")
+    print(f"Mean element volume: {mesh.quality.volume_mean:.3e} m³")
+```
+
+---
+
+## MeshData structure
+
+`MeshData` is the canonical output of mesh generation and the input to FEM backend lowering:
+
+| Field | Shape | Description |
+|---|---|---|
+| `nodes` | `(N, 3) float64` | Node coordinates in SI metres |
+| `elements` | `(M, 4) int32` | Tetrahedral element connectivity |
+| `element_markers` | `(M,) int32` | Per-element domain markers (1 = magnetic, 2 = air) |
+| `boundary_faces` | `(F, 3) int32` | Triangular boundary face connectivity |
+| `boundary_markers` | `(F,) int32` | Per-face boundary markers |
+
+```python
+mesh.save("strip.npz")      # NumPy compressed archive
+mesh.save("strip.json")     # JSON (human-readable, larger)
+mesh.export_stl("strip.stl")  # boundary surface as binary STL
+mesh.export_vtk("strip.vtk")  # full tetrahedral mesh as VTK legacy
+```
+
+---
+
+## Imported geometries
+
+Use `fm.ImportedGeometry` to load a custom STL or pre-meshed file instead of generating from a primitive:
+
+```python
+import fullmag as fm
+
+geom = fm.ImportedGeometry(
+    source="my_magnet.stl",
+    scale=1e-9,   # scale factor: 1e-9 means file units are nm
+)
+
+magnet = fm.Ferromagnet(
+    name="custom",
+    geometry=geom,
+    material=fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.02),
+    m0=fm.init.uniform((1.0, 0.0, 0.0)),
+)
+```
+
+`generate_mesh_from_file()` is called automatically when `ImportedGeometry` is used with the FEM backend. The imported surface is meshed via the Gmsh GEO kernel rather than the OCC kernel.
+
+---
+
+## Box → mesh lowering
+
+For `Box` geometry with the FEM backend, the planner performs automatic Box → mesh lowering. No explicit mesh file is needed:
+
+```python
+import fullmag as fm
+
+problem = fm.Problem(
+    name="box_fem",
+    magnets=[
+        fm.Ferromagnet(
+            name="film",
+            geometry=fm.Box(size=(128e-9, 64e-9, 4e-9)),
+            material=fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5),
+            m0=fm.init.random(seed=7),
+        )
+    ],
+    energy=[fm.Exchange(), fm.Demag()],
+    study=fm.TimeEvolution(
+        dynamics=fm.LLG(fixed_timestep=1e-13),
+        outputs=[fm.SaveField("m", every=50e-12)],
+    ),
+    discretization=fm.DiscretizationHints(
+        fem=fm.FEM(mesh=None, hmax=4e-9, order=1),
+    ),
+)
+```
+
+The planner resolves `mesh=None` into a `generate_box_mesh()` call with the given `hmax`, producing a conforming tetrahedral mesh ready for FEM execution.
+
+---
+
+## Universe vs object mesh separation
+
+The Universe mesh is the solver domain — it is **not** just another object. The separation between Universe mesh config and per-object mesh config exists so that:
+
+- air/Universe meshing can use a coarser target and grading policy than the magnetic bodies,
+- each magnetic object remains independently inspectable and tunable,
+- improving the mesh of object A does not implicitly rewrite the authoring contract for object B,
+- the final solver still consumes one conforming shared-domain mesh.
+
+<Note>
+  `generate_shared_domain_mesh_from_components()` is the low-level function that assembles the final solver mesh from Universe + object components. It is called by the FEM planner automatically. You do not call it directly in normal authoring workflows.
+</Note>

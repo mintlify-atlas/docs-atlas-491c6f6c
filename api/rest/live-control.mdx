@@ -1,0 +1,329 @@
+---
+title: 'Live control'
+description: 'Singleton local current-live workspace API for real-time field preview, control commands, and display selection in the browser control room.'
+---
+
+The live control API provides a singleton projection over the active local workspace. It is the transport layer that connects the browser control room to the currently running simulation without requiring session-level URL routing.
+
+<Warning>
+  This is a **local UX transport**, not a replacement for the canonical session and run API. For historical data, field access, artifact downloads, and provenance, use the [Sessions API](/api/rest/sessions) and [Runs API](/api/rest/runs) instead.
+</Warning>
+
+<Info>
+  Base URL: `http://localhost:8080`. The live workspace is populated automatically when `fullmag script.py` runs without `--headless`.
+</Info>
+
+## Design principles
+
+- The live workspace is a **singleton**: it represents the current execution context, not a named session or run.
+- The browser targets `/` for the local live control room and does not require `?session=` URL parameters.
+- Heavy preview vectors (field data for live visualisation) are delivered as **binary WebSocket frames** on `/ws/live/current`, not as inline JSON arrays through the event stream.
+- Scalar statistics, lifecycle events, and display selection changes are delivered as JSON messages through the SSE stream or the bootstrap snapshot.
+
+---
+
+## Bootstrap endpoint
+
+### Get current workspace bootstrap
+
+**`GET /v1/live/current/bootstrap`**
+
+Returns the full current workspace snapshot in a single response. Use this at page load to initialise the control room before subscribing to the live event stream. The response includes the current session state, plan summary, scalar history, display selection, and artifact index.
+
+<CodeGroup>
+
+```bash Bootstrap control room
+curl http://localhost:8080/v1/live/current/bootstrap
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "session_id": "session-1743696000-42801",
+  "run_id": "run-1743696000-42801",
+  "status": "running",
+  "problem_name": "exchange_relax",
+  "resolved_backend": "fdm",
+  "execution_mode": "strict",
+  "execution_precision": "double",
+  "plan_summary": {
+    "backend": "fdm",
+    "device": "cpu",
+    "runtime_family": "cpu-reference"
+  },
+  "display_selection": {
+    "quantity": "m",
+    "component": "magnitude",
+    "layer": 0,
+    "auto_scale": true
+  },
+  "recent_scalars": [
+    { "step": 900, "time": 9e-11, "E_ex": -1.22e-18 },
+    { "step": 1000, "time": 1e-10, "E_ex": -1.23e-18 }
+  ],
+  "artifacts": {
+    "scalars": "scalars.csv",
+    "fields/m": "fields/m/step_1000.json"
+  }
+}
+```
+
+---
+
+## WebSocket endpoint
+
+### Binary live preview stream
+
+**`GET /ws/live/current`** (WebSocket upgrade)
+
+Bidirectional WebSocket for live field preview. Connect with a WebSocket client to receive binary preview frames as the simulation runs.
+
+<Info>
+  This endpoint requires a WebSocket upgrade. It cannot be called with a plain HTTP client.
+</Info>
+
+#### Message format
+
+Incoming messages from the server are delivered in two formats:
+
+- **JSON text frames** — carry the canonical `session_state` envelope with lifecycle updates, scalar statistics, and display selection changes.
+- **Binary frames** — carry the preview vector payload for the currently selected field quantity. Binary frames are associated with the most recent `session_state` snapshot sequence number.
+
+The `session_state` text envelope:
+
+```json
+{
+  "kind": "session_state",
+  "session_id": "session-1743696000-42801",
+  "run_id": "run-1743696000-42801",
+  "sequence": 42,
+  "timestamp": "2026-04-01T12:00:10Z",
+  "status": "running",
+  "step": 1000,
+  "time": 1e-10,
+  "E_ex": -1.23e-18,
+  "display_selection": {
+    "quantity": "m",
+    "component": "magnitude",
+    "layer": 0
+  },
+  "has_preview": true
+}
+```
+
+When `has_preview` is `true`, the server immediately follows with a binary frame containing the flat preview vector for the selected quantity. The binary payload is a packed array of `float32` values in the same grid order as the FDM or FEM mesh.
+
+<Warning>
+  Binary preview frames are large. Do not log or buffer more frames than the control room needs to render at the current display refresh rate.
+</Warning>
+
+<CodeGroup>
+
+```javascript Browser WebSocket
+const ws = new WebSocket('ws://localhost:8080/ws/live/current');
+
+ws.onmessage = (event) => {
+  if (typeof event.data === 'string') {
+    const msg = JSON.parse(event.data);
+    if (msg.kind === 'session_state') {
+      updateStatusPanel(msg);
+    }
+  } else {
+    // Binary ArrayBuffer — preview vector for current selection
+    renderPreviewFrame(event.data);
+  }
+};
+```
+
+```python Python WebSocket client
+import asyncio
+import websockets
+import json
+
+async def watch_live():
+    async with websockets.connect('ws://localhost:8080/ws/live/current') as ws:
+        async for message in ws:
+            if isinstance(message, str):
+                state = json.loads(message)
+                print(f"step={state['step']} E_ex={state.get('E_ex')}")
+            else:
+                print(f"Binary preview frame: {len(message)} bytes")
+
+asyncio.run(watch_live())
+```
+
+</CodeGroup>
+
+---
+
+## Control commands
+
+### Send control command
+
+**`POST /v1/live/current/commands`**
+
+Enqueues a control command for the running simulation. Commands are consumed by the runner on the next available command poll cycle.
+
+<ParamField body="kind" type="string" required>
+  Command kind. Currently supported values depend on the active backend. Common kinds: `pause`, `resume`, `stop`, `set_field`.
+</ParamField>
+
+<ParamField body="payload" type="object">
+  Command-specific payload. Schema varies by `kind`.
+</ParamField>
+
+<CodeGroup>
+
+```bash Pause simulation
+curl -X POST http://localhost:8080/v1/live/current/commands \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "pause"}'
+```
+
+```bash Resume simulation
+curl -X POST http://localhost:8080/v1/live/current/commands \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "resume"}'
+```
+
+```bash Stop simulation
+curl -X POST http://localhost:8080/v1/live/current/commands \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "stop"}'
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "ok": true,
+  "sequence": 7
+}
+```
+
+---
+
+## Display selection
+
+The display selection controls which field quantity and component the binary preview stream delivers. Changing the selection takes effect on the next preview frame emitted by the runner.
+
+### Get display selection
+
+**`GET /v1/live/current/preview/selection`**
+
+Returns the current display selection for the live preview stream.
+
+<CodeGroup>
+
+```bash Get display selection
+curl http://localhost:8080/v1/live/current/preview/selection
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "quantity": "m",
+  "component": "magnitude",
+  "layer": 0,
+  "auto_scale": true,
+  "every_n": 10,
+  "max_points": 4096
+}
+```
+
+### Set display selection
+
+**`POST /v1/live/current/preview/selection`**
+
+Updates the display selection. The runner begins delivering preview frames for the new quantity on the next step that triggers a preview.
+
+<ParamField body="quantity" type="string" required>
+  Field quantity to preview. See available quantities below.
+</ParamField>
+
+<ParamField body="component" type="string" default="magnitude">
+  Vector component to visualise. One of `magnitude`, `x`, `y`, `z`.
+</ParamField>
+
+<ParamField body="layer" type="number" default="0">
+  Layer index along the z-axis for 2D slice preview.
+</ParamField>
+
+<ParamField body="auto_scale" type="boolean" default="true">
+  Whether to auto-scale the colour range to the current frame's min/max.
+</ParamField>
+
+<ParamField body="every_n" type="number" default="10">
+  Emit a preview frame every N solver steps. Higher values reduce bandwidth.
+</ParamField>
+
+<ParamField body="max_points" type="number" default="4096">
+  Maximum number of sample points in the preview vector. Controls downsampling for large grids.
+</ParamField>
+
+Available quantities:
+
+| Quantity | Description |
+|---|---|
+| `m` | Normalised magnetisation vector field |
+| `H_ex` | Exchange effective field |
+| `H_demag` | Demagnetisation field |
+| `H_ext` | External applied field |
+| `H_eff` | Total effective field |
+| `E_ex` | Exchange energy density |
+
+<CodeGroup>
+
+```bash Preview magnetisation magnitude
+curl -X POST http://localhost:8080/v1/live/current/preview/selection \
+  -H "Content-Type: application/json" \
+  -d '{"quantity": "m", "component": "magnitude"}'
+```
+
+```bash Preview x-component of exchange field
+curl -X POST http://localhost:8080/v1/live/current/preview/selection \
+  -H "Content-Type: application/json" \
+  -d '{"quantity": "H_ex", "component": "x", "auto_scale": true}'
+```
+
+```bash Reduce preview frequency
+curl -X POST http://localhost:8080/v1/live/current/preview/selection \
+  -H "Content-Type: application/json" \
+  -d '{"quantity": "m", "every_n": 50, "max_points": 1024}'
+```
+
+</CodeGroup>
+
+```json Response
+{
+  "ok": true,
+  "selection": {
+    "quantity": "H_ex",
+    "component": "x",
+    "layer": 0,
+    "auto_scale": true,
+    "every_n": 10,
+    "max_points": 4096
+  }
+}
+```
+
+---
+
+## Additional live endpoints
+
+The following endpoints are also available on the live workspace:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v1/live/current/state` | `GET` | Current live state snapshot (JSON) |
+| `/v1/live/current/events` | `GET` | SSE event stream for the current workspace |
+| `/v1/live/current/artifacts` | `GET` | List artifacts in the current workspace |
+| `/v1/live/current/artifacts/file` | `GET` | Read a specific artifact file |
+| `/v1/live/current/gpu/telemetry` | `GET` | GPU utilisation and memory telemetry |
+
+<Tip>
+  For persistent access to session data after the simulation completes, switch from the live endpoints to the canonical [Sessions API](/api/rest/sessions) and [Runs API](/api/rest/runs). The live workspace is cleared when a new `fullmag script.py` invocation starts.
+</Tip>

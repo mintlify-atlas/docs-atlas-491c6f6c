@@ -1,0 +1,185 @@
+---
+title: "LLG dynamics"
+description: "The Landau-Lifshitz-Gilbert equation, the Heun integrator, and TimeEvolution usage in Fullmag."
+---
+
+The Landau-Lifshitz-Gilbert (LLG) equation governs the time evolution of the magnetization in
+Fullmag. It describes both the precession of `m` around the effective field and the dissipation
+that drives `m` toward alignment with `H_eff`.
+
+## The LLG equation
+
+Fullmag uses the **Gilbert form** of LLG:
+
+```
+dm/dt = -γ/(1+α²) [ m × H_eff  +  α m × (m × H_eff) ]
+```
+
+The two terms on the right-hand side have distinct physical roles:
+
+- `m × H_eff` — **precession**: the magnetization orbits around `H_eff`.
+- `α m × (m × H_eff)` — **damping**: the magnetization spirals toward `H_eff`.
+
+At equilibrium, both terms vanish. The equilibrium condition is `m ∥ H_eff`, or equivalently
+`m × H_eff = 0` (zero torque).
+
+<Info>
+The prefactor `γ/(1+α²)` ensures that the precession frequency and damping rate are both
+rescaled consistently by the same denominator. This is the Gilbert normalization convention.
+</Info>
+
+### Parameters
+
+| Symbol | Description | SI unit |
+|--------|-------------|---------|
+| `m` | Reduced magnetization (unit vector) | dimensionless |
+| `Ms` | Saturation magnetization | A/m |
+| `γ` | Gyromagnetic ratio | m/(A·s) |
+| `α` | Gilbert damping coefficient | dimensionless |
+| `H_eff` | Effective field (sum of all active energy contributions) | A/m |
+| `t` | Time | s |
+
+The effective field is assembled from all active energy terms:
+
+```
+H_eff = H_ex + H_demag + H_ext + ...
+```
+
+Each energy term contributes an additive field. The exchange contribution for a homogeneous
+material is:
+
+```
+H_ex = (2A / μ₀ Ms) ∇²m
+```
+
+where `A` is the exchange stiffness in J/m and `μ₀` is the vacuum permeability.
+
+## The Heun integrator
+
+Fullmag uses an **explicit Heun (second-order Runge-Kutta) integrator** for time integration.
+The Heun scheme is a predictor-corrector method:
+
+<Steps>
+  <Step title="Evaluate the slope at the current step">
+    Compute `k1 = f(m_n)` where `f` is the LLG right-hand side evaluated at the current
+    magnetization `m_n`.
+  </Step>
+  <Step title="Predict the next state">
+    Form a predicted magnetization: `m* = normalize(m_n + dt · k1)`.
+    The normalization step renormalizes `m` after the explicit update to prevent drift of
+    `|m|` away from 1.
+  </Step>
+  <Step title="Evaluate the slope at the predicted state">
+    Compute `k2 = f(m*)` using the predicted magnetization.
+  </Step>
+  <Step title="Correct the update">
+    Accept the corrected step: `m_{n+1} = normalize(m_n + 0.5 · dt · (k1 + k2))`.
+    Renormalization is applied again after the corrector update.
+  </Step>
+</Steps>
+
+Both the predictor and corrector steps renormalize `m` to control explicit-step drift of the
+unit-length constraint. This is a trusted baseline for future CUDA backend parity tests.
+
+### Fixed timestep
+
+The current public-executable path uses a **fixed timestep**. Adaptive time stepping is deferred.
+
+```python
+fm.LLG(integrator="heun", fixed_timestep=1e-13)
+```
+
+The timestep `1e-13` s (0.1 ps) is a typical starting point for Permalloy-like materials. It
+should be small enough that the exchange spin-wave precession period is resolved. If in doubt,
+verify that results do not change significantly when the timestep is halved.
+
+## TimeEvolution study
+
+The `TimeEvolution` study integrates the LLG equation from an initial magnetization state to a
+specified simulation time.
+
+```python
+import fullmag as fm
+
+def build() -> fm.Problem:
+    film = fm.Box(size=(128e-9, 64e-9, 4e-9), name="film")
+    mat = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+    magnet = fm.Ferromagnet(
+        name="film",
+        geometry=film,
+        material=mat,
+        m0=fm.init.random(seed=7),
+    )
+
+    return fm.Problem(
+        name="llg_time_evolution",
+        magnets=[magnet],
+        energy=[
+            fm.Exchange(),
+            fm.Demag(),
+            fm.Zeeman(B=(0.0, 0.0, 0.05)),
+        ],
+        study=fm.TimeEvolution(
+            dynamics=fm.LLG(fixed_timestep=1e-13),
+            outputs=[
+                fm.SaveField("m", every=50e-12),
+                fm.SaveScalar("E_ex", every=10e-12),
+                fm.SaveScalar("E_demag", every=10e-12),
+                fm.SaveScalar("E_ext", every=10e-12),
+                fm.SaveScalar("E_total", every=10e-12),
+            ],
+        ),
+        discretization=fm.DiscretizationHints(
+            fdm=fm.FDM(cell=(4e-9, 4e-9, 4e-9)),
+        ),
+    )
+
+if __name__ == "__main__":
+    problem = build()
+    result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+    print(f"Status: {result.status}")
+    print(f"Total steps: {len(result.steps)}")
+    print(f"Final time: {result.steps[-1].time:.6e} s")
+```
+
+### `until` parameter
+
+The `until` parameter passed to `Simulation.run()` sets the end time in seconds:
+
+```python
+result = fm.Simulation(problem, backend="fdm").run(until=5e-10)
+```
+
+The run stops when the simulation time reaches or exceeds `until`. The number of steps taken
+is `until / fixed_timestep`.
+
+## SI units summary
+
+| Quantity | Symbol | Unit |
+|----------|--------|------|
+| Magnetization | `M` | A/m |
+| Reduced magnetization | `m` | dimensionless |
+| Saturation magnetization | `Ms` | A/m |
+| Exchange stiffness | `A` | J/m |
+| Damping | `α` | dimensionless |
+| Gyromagnetic ratio | `γ` | m/(A·s) |
+| Effective field | `H_eff` | A/m |
+| Time | `t` | s |
+| Timestep | `dt` | s |
+
+## Capability tiers
+
+| Feature | FDM | FEM |
+|---------|-----|-----|
+| `LLG` (Heun integrator) | public-executable | public-executable |
+| Fixed timestep | public-executable | public-executable |
+| Adaptive timestep | not yet available | not yet available |
+
+The CPU reference runner operates in `double` precision. CUDA FDM supports both `double`
+and calibrated `single` precision. FEM uses the CPU reference at `double` precision.
+
+<Note>
+The CPU reference engine is intentionally narrow: one ferromagnet, `Box` geometry, `fdm/strict`
+mode, and `double` precision. It is the canonical numerical baseline against which future CUDA
+kernels are validated for sign conventions and SI units.
+</Note>

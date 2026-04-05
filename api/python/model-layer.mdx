@@ -1,0 +1,687 @@
+---
+title: "Model layer"
+description: "Describe the physical system: geometry, materials, magnets, energy terms, and discretization hints."
+keywords: ["model", "geometry", "material", "ferromagnet", "energy", "problem", "discretization", "FDM", "FEM"]
+---
+
+The model layer answers the question **what physical system exists?** It contains no solver logic — only a declarative description of geometry, materials, magnetic bodies, energy contributions, and discretization preferences. All model objects are immutable frozen dataclasses. They lower to a canonical `ProblemIR` before execution.
+
+<Columns cols={3}>
+  <Card title="Geometry" icon="cube" href="#geometry">
+    Primitives and CSG booleans.
+  </Card>
+  <Card title="Structure" icon="layer-group" href="#structure">
+    Materials, regions, and magnets.
+  </Card>
+  <Card title="Energy terms" icon="bolt" href="#energy-terms">
+    Exchange, demag, Zeeman, DMI, and more.
+  </Card>
+</Columns>
+
+---
+
+## Geometry
+
+All geometry classes inherit from `_GeometryOps`, which provides `+`, `-`, `&`, and `.translate()` operators for constructive solid geometry (CSG).
+
+### Box
+
+An axis-aligned rectangular box centered at the origin.
+
+```python
+fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+fm.Box(200e-9, 20e-9, 5e-9)              # positional form
+fm.Box(size=(200e-9, 20e-9, 5e-9))       # keyword form
+```
+
+<ParamField path="size" type="tuple[float, float, float]" required>
+  Side lengths (dx, dy, dz) in metres. All components must be positive.
+</ParamField>
+
+<ParamField path="name" type="string" default="box">
+  Geometry name used in IR and artifact filenames.
+</ParamField>
+
+---
+
+### Cylinder
+
+A circular cylinder centered at the origin with its axis along z.
+
+```python
+fm.Cylinder(radius=50e-9, height=10e-9)
+fm.Cylinder(50e-9, 10e-9, name="pillar")
+```
+
+<ParamField path="radius" type="float" required>
+  Cylinder radius in metres. Must be positive.
+</ParamField>
+
+<ParamField path="height" type="float" required>
+  Cylinder height in metres. Must be positive.
+</ParamField>
+
+<ParamField path="name" type="string" default="cylinder">
+  Geometry name.
+</ParamField>
+
+---
+
+### Sphere
+
+Convenience constructor returning an `Ellipsoid` with equal semi-axes.
+
+```python
+fm.Sphere(radius=30e-9)
+fm.Sphere(30e-9, name="dot")
+```
+
+<ParamField path="radius" type="float" required>
+  Sphere radius in metres. Must be positive.
+</ParamField>
+
+<ParamField path="name" type="string" default="sphere">
+  Geometry name.
+</ParamField>
+
+---
+
+### Ellipsoid
+
+An ellipsoid centered at the origin with independent semi-axes.
+
+```python
+fm.Ellipsoid(rx=60e-9, ry=30e-9, rz=10e-9)
+```
+
+<ParamField path="rx" type="float" required>
+  Semi-axis along x in metres.
+</ParamField>
+
+<ParamField path="ry" type="float" required>
+  Semi-axis along y in metres.
+</ParamField>
+
+<ParamField path="rz" type="float" required>
+  Semi-axis along z in metres.
+</ParamField>
+
+<ParamField path="name" type="string" default="ellipsoid">
+  Geometry name.
+</ParamField>
+
+---
+
+### Ellipse
+
+An elliptical disk centered at the origin with its axis along z.
+
+```python
+fm.Ellipse(rx=80e-9, ry=40e-9, height=5e-9)
+```
+
+<ParamField path="rx" type="float" required>
+  Semi-axis along x in metres.
+</ParamField>
+
+<ParamField path="ry" type="float" required>
+  Semi-axis along y in metres.
+</ParamField>
+
+<ParamField path="height" type="float" required>
+  Disk thickness in metres.
+</ParamField>
+
+<ParamField path="name" type="string" default="ellipse">
+  Geometry name.
+</ParamField>
+
+---
+
+### ImportedGeometry
+
+Load a geometry from an external file (NPZ mask, STL, STEP, or similar).
+
+```python
+fm.ImportedGeometry(source="geometry/pillar.stl", scale=1e-9, units="nm")
+fm.ImportedGeometry(source="mask.npz", name="grain")
+```
+
+<ParamField path="source" type="string" required>
+  Path to the geometry file. Relative paths are resolved from the script directory.
+</ParamField>
+
+<ParamField path="scale" type="float | tuple[float, float, float]" default="1.0">
+  Uniform or per-axis scale factor applied after any `units` conversion.
+</ParamField>
+
+<ParamField path="units" type="string">
+  Physical units of the source file coordinates. Accepted values: `"m"`, `"cm"`, `"mm"`, `"um"` / `"µm"` / `"μm"`, `"nm"`, `"pm"`. When set, coordinates are converted to metres before `scale` is applied.
+</ParamField>
+
+<ParamField path="name" type="string">
+  Override for the geometry name. Defaults to the filename stem.
+</ParamField>
+
+<ParamField path="volume" type="string" default="full">
+  `"full"` loads a volumetric geometry. `"surface"` loads a surface-only mesh (preview/STL export only — not executable with FEM).
+</ParamField>
+
+---
+
+## CSG boolean operations
+
+All geometry objects support Python operator overloads for CSG composition.
+
+| Expression | Class | Meaning |
+|---|---|---|
+| `a + b` | `Union` | Volume occupied by a or b |
+| `a - b` | `Difference` | Volume of a minus b |
+| `a & b` | `Intersection` | Volume shared by a and b |
+| `a.translate(offset)` | `Translate` | Shift a by a 3D offset |
+
+### Union
+
+```python
+body = fm.Box(size=(1e-6, 1e-6, 10e-9)) + fm.Cylinder(radius=50e-9, height=10e-9)
+# equivalent to:
+body = fm.Union(a=fm.Box(...), b=fm.Cylinder(...))
+```
+
+### Difference
+
+```python
+body = fm.Box(size=(1e-6, 1e-6, 10e-9)) - fm.Cylinder(radius=50e-9, height=10e-9)
+# equivalent to:
+body = fm.Difference(base=fm.Box(...), tool=fm.Cylinder(...))
+```
+
+### Intersection
+
+```python
+body = fm.Box(size=(1e-6, 1e-6, 10e-9)) & fm.Cylinder(radius=500e-9, height=10e-9)
+```
+
+### Translate
+
+```python
+hole = fm.Cylinder(radius=50e-9, height=10e-9).translate((100e-9, 0, 0))
+# equivalent to:
+hole = fm.Translate(geometry=fm.Cylinder(...), offset=(100e-9, 0, 0))
+```
+
+<Note>
+All four CSG classes accept an optional `name` parameter to override the derived geometry name in IR output.
+</Note>
+
+---
+
+## Structure
+
+### Material
+
+Defines the magnetic material parameters for a ferromagnetic body.
+
+```python
+mat = fm.Material(
+    name="Py",
+    Ms=800e3,   # A/m
+    A=13e-12,   # J/m
+    alpha=0.5,
+)
+
+mat_pma = fm.Material(
+    name="CoFeB",
+    Ms=1.1e6,
+    A=15e-12,
+    alpha=0.01,
+    Ku1=0.8e6,
+    anisU=(0.0, 0.0, 1.0),
+)
+```
+
+<ParamField path="name" type="string" required>
+  Unique material identifier within a `Problem`.
+</ParamField>
+
+<ParamField path="Ms" type="float" required>
+  Saturation magnetization in A/m. Must be positive.
+</ParamField>
+
+<ParamField path="A" type="float" required>
+  Exchange stiffness constant in J/m. Must be positive.
+</ParamField>
+
+<ParamField path="alpha" type="float" required>
+  Gilbert damping constant (dimensionless). Must be non-negative.
+</ParamField>
+
+<ParamField path="Ku1" type="float">
+  First-order uniaxial anisotropy constant in J/m³. Positive = easy axis, negative = easy plane.
+</ParamField>
+
+<ParamField path="Ku2" type="float">
+  Second-order uniaxial anisotropy constant in J/m³.
+</ParamField>
+
+<ParamField path="anisU" type="tuple[float, float, float]">
+  Uniaxial easy-axis direction (unit vector). Default `(0, 0, 1)`.
+</ParamField>
+
+<ParamField path="Kc1" type="float">
+  First cubic anisotropy constant in J/m³.
+</ParamField>
+
+<ParamField path="Kc2" type="float">
+  Second cubic anisotropy constant in J/m³.
+</ParamField>
+
+<ParamField path="Kc3" type="float">
+  Third cubic anisotropy constant in J/m³.
+</ParamField>
+
+<ParamField path="anisC1" type="tuple[float, float, float]">
+  First crystal axis for cubic anisotropy (unit vector).
+</ParamField>
+
+<ParamField path="anisC2" type="tuple[float, float, float]">
+  Second crystal axis for cubic anisotropy (unit vector, perpendicular to `anisC1`).
+</ParamField>
+
+---
+
+### Region
+
+A named geometric sub-region used to map materials to geometry in multi-region problems.
+
+```python
+region = fm.Region(name="free_layer", geometry=some_geometry)
+```
+
+<ParamField path="name" type="string" required>
+  Region identifier. Must be non-empty.
+</ParamField>
+
+<ParamField path="geometry" type="Geometry" required>
+  Geometry defining the region boundary.
+</ParamField>
+
+---
+
+### Ferromagnet
+
+A named ferromagnetic body: geometry + material + optional initial magnetization.
+
+```python
+magnet = fm.Ferromagnet(
+    name="strip",
+    geometry=fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip"),
+    material=mat,
+    m0=fm.init.random(seed=42),
+)
+```
+
+<ParamField path="name" type="string" required>
+  Unique magnet name within a `Problem`.
+</ParamField>
+
+<ParamField path="geometry" type="Geometry" required>
+  Geometry of the ferromagnetic body.
+</ParamField>
+
+<ParamField path="material" type="Material" required>
+  Material parameters for this body.
+</ParamField>
+
+<ParamField path="region" type="Region">
+  Optional explicit region binding. If omitted, an implicit region is created with the same name as the magnet.
+</ParamField>
+
+<ParamField path="m0" type="InitialMagnetization">
+  Initial magnetization state. Defaults to `uniform((1, 0, 0))` when not set. See [Magnetization initialization](/api/python/initialization).
+</ParamField>
+
+<ParamField path="mesh" type="PerObjectMeshRecipe">
+  Per-object FEM mesh recipe. Overrides global `FEM` hints for this body only.
+</ParamField>
+
+---
+
+## Energy terms
+
+Energy terms are passed as a list to `Problem.energy`. At least one is required.
+
+### Exchange
+
+Heisenberg exchange interaction. No parameters required.
+
+```python
+fm.Exchange()
+```
+
+---
+
+### Demag
+
+Magnetostatic demagnetization field.
+
+```python
+fm.Demag()
+fm.Demag(realization="auto")           # let the planner choose
+fm.Demag(realization="transfer_grid")  # FDM convolution
+```
+
+<ParamField path="realization" type="string" default="auto">
+  Solver realization. Accepted values: `"auto"`, `"transfer_grid"`, `"poisson_dirichlet"`, `"poisson_robin"`. `None` is equivalent to `"auto"`.
+</ParamField>
+
+---
+
+### Zeeman
+
+Uniform external applied field.
+
+```python
+fm.Zeeman(B=(0.0, 0.0, 0.05))  # 50 mT along z
+```
+
+<ParamField path="B" type="tuple[float, float, float]" required>
+  External flux density vector in Tesla.
+</ParamField>
+
+---
+
+### InterfacialDMI
+
+Interfacial Dzyaloshinskii–Moriya interaction (thin-film DMI).
+
+```python
+fm.InterfacialDMI(D=3e-3)  # 3 mJ/m²
+```
+
+<ParamField path="D" type="float" required>
+  DMI constant in J/m². Must be positive.
+</ParamField>
+
+---
+
+### BulkDMI
+
+Bulk (isotropic) Dzyaloshinskii–Moriya interaction.
+
+```python
+fm.BulkDMI(D=2e-3)
+```
+
+<ParamField path="D" type="float" required>
+  DMI constant in J/m². Must be positive.
+</ParamField>
+
+---
+
+### UniaxialAnisotropy
+
+Uniaxial magnetocrystalline anisotropy energy term.
+
+Energy density: `e = Ku1 · sin²(θ) + Ku2 · sin⁴(θ)` where θ is the angle between magnetization and the easy axis.
+
+```python
+fm.UniaxialAnisotropy(ku1=0.5e6, axis=(0.0, 0.0, 1.0))
+fm.UniaxialAnisotropy(ku1=0.5e6, ku2=0.1e6, axis=(0.0, 0.0, 1.0))
+```
+
+<ParamField path="ku1" type="float" required>
+  First-order constant in J/m³.
+</ParamField>
+
+<ParamField path="ku2" type="float" default="0.0">
+  Second-order constant in J/m³.
+</ParamField>
+
+<ParamField path="axis" type="tuple[float, float, float]" default="(0, 0, 1)">
+  Easy-axis direction (unit vector).
+</ParamField>
+
+<Note>
+Anisotropy can also be specified directly on `Material` via `Ku1`, `Ku2`, and `anisU`. Using `UniaxialAnisotropy` as an explicit energy term is the preferred approach for readability.
+</Note>
+
+---
+
+### CubicAnisotropy
+
+Cubic magnetocrystalline anisotropy energy term.
+
+```python
+fm.CubicAnisotropy(kc1=-1.2e4, axis1=(1, 0, 0), axis2=(0, 1, 0))
+```
+
+<ParamField path="kc1" type="float" required>
+  First cubic constant in J/m³.
+</ParamField>
+
+<ParamField path="kc2" type="float" default="0.0">
+  Second cubic constant in J/m³.
+</ParamField>
+
+<ParamField path="kc3" type="float" default="0.0">
+  Third cubic constant in J/m³.
+</ParamField>
+
+<ParamField path="axis1" type="tuple[float, float, float]" default="(1, 0, 0)">
+  First crystal axis (unit vector).
+</ParamField>
+
+<ParamField path="axis2" type="tuple[float, float, float]" default="(0, 1, 0)">
+  Second crystal axis (unit vector, perpendicular to `axis1`).
+</ParamField>
+
+---
+
+### ThermalNoise
+
+Stochastic thermal fluctuations (Brown noise) in the LLG equation.
+
+The stochastic field amplitude follows the fluctuation-dissipation theorem.
+
+```python
+fm.ThermalNoise(temperature=300, seed=42)
+```
+
+<ParamField path="temperature" type="float" required>
+  Temperature in Kelvin. Must be positive.
+</ParamField>
+
+<ParamField path="seed" type="int">
+  RNG seed for reproducibility. If `None`, a time-dependent seed is used.
+</ParamField>
+
+---
+
+### Magnetoelastic
+
+Magnetoelastic coupling energy linking a ferromagnet to an elastic body.
+
+```python
+fm.Magnetoelastic(magnet="strip", body="strip_elastic", law="nickel_bcc")
+```
+
+<ParamField path="magnet" type="string" required>
+  Name of the `Ferromagnet` participating in the coupling.
+</ParamField>
+
+<ParamField path="body" type="string" required>
+  Name of the `ElasticBody` participating in the coupling.
+</ParamField>
+
+<ParamField path="law" type="string" required>
+  Name of the `MagnetostrictionLaw` to use.
+</ParamField>
+
+---
+
+## Problem
+
+`Problem` is the top-level model object. It assembles all components and lowers to IR.
+
+```python
+problem = fm.Problem(
+    name="exchange_relax",
+    magnets=[magnet],
+    energy=[fm.Exchange()],
+    study=fm.Relaxation(
+        algorithm="llg_overdamped",
+        torque_tolerance=5e-2,
+        outputs=[fm.SaveField("m", every=100e-12)],
+    ),
+    discretization=fm.DiscretizationHints(
+        fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9)),
+    ),
+)
+```
+
+<ParamField path="name" type="string" required>
+  Human-readable problem identifier.
+</ParamField>
+
+<ParamField path="magnets" type="Ferromagnet[]" required>
+  List of ferromagnetic bodies. At least one required. Names must be unique.
+</ParamField>
+
+<ParamField path="energy" type="EnergyTerm[]" required>
+  List of energy terms. At least one required.
+</ParamField>
+
+<ParamField path="study" type="TimeEvolution | Relaxation | Eigenmodes" required>
+  Study definition specifying what computation to perform. See [Study layer](/api/python/study-layer).
+</ParamField>
+
+<ParamField path="discretization" type="DiscretizationHints">
+  Mesh or grid hints for the backend. See below.
+</ParamField>
+
+<ParamField path="description" type="string">
+  Optional free-text description stored in problem metadata.
+</ParamField>
+
+<ParamField path="runtime" type="RuntimeSelection">
+  Execution policy (backend, device, precision, mode). See [Runtime layer](/api/python/runtime-layer).
+</ParamField>
+
+---
+
+## Discretization hints
+
+`DiscretizationHints` is the container that holds at most one hint block per solver class. You may provide `fdm`, `fem`, or both (enabling backend-neutral scripts).
+
+```python
+fm.DiscretizationHints(
+    fdm=fm.FDM(cell=(4e-9, 4e-9, 4e-9)),
+)
+
+fm.DiscretizationHints(
+    fdm=fm.FDM(cell=(2e-9, 2e-9, 1e-9)),
+    fem=fm.FEM(order=1, hmax=2e-9),
+    hybrid=fm.Hybrid(demag="fft_aux_grid"),
+)
+```
+
+### FDM
+
+Finite-difference discretization hints.
+
+```python
+fm.FDM(cell=(4e-9, 4e-9, 4e-9))
+
+# Multi-magnet with per-magnet grids and demag policy:
+fm.FDM(
+    default_cell=(4e-9, 4e-9, 1e-9),
+    per_magnet={
+        "free": fm.FDMGrid(cell=(2e-9, 2e-9, 1e-9)),
+        "ref":  fm.FDMGrid(cell=(4e-9, 4e-9, 1e-9)),
+    },
+    demag=fm.FDMDemag(
+        strategy="multilayer_convolution",
+        mode="two_d_stack",
+        common_cells_xy=(512, 512),
+    ),
+)
+```
+
+<ParamField path="cell" type="tuple[float, float, float]">
+  Default cell size (dx, dy, dz) in metres. Alias for `default_cell`. Either `cell` or `default_cell` must be set, or at least one entry in `per_magnet`.
+</ParamField>
+
+<ParamField path="default_cell" type="tuple[float, float, float]">
+  Default cell size (dx, dy, dz) in metres. Cannot be set together with `cell`.
+</ParamField>
+
+<ParamField path="per_magnet" type="dict[str, FDMGrid]">
+  Per-magnet native grid overrides, keyed by magnet name.
+</ParamField>
+
+<ParamField path="demag" type="FDMDemag">
+  Demagnetization solver policy for multi-magnet problems.
+</ParamField>
+
+<ParamField path="boundary_correction" type="string">
+  Boundary correction policy: `"none"`, `"volume"` (T0), or `"full"` (T1).
+</ParamField>
+
+### FEM
+
+Finite-element discretization hints.
+
+```python
+fm.FEM(order=1, hmax=2e-9)
+```
+
+<ParamField path="order" type="integer" required>
+  Polynomial element order. Must be ≥ 1.
+</ParamField>
+
+<ParamField path="hmax" type="float" required>
+  Maximum element size in metres. Must be positive.
+</ParamField>
+
+<ParamField path="mesh" type="string">
+  Optional path to a pre-built mesh file (`.npz` or `.json`).
+</ParamField>
+
+---
+
+## Complete example
+
+```python
+import fullmag as fm
+
+strip = fm.Box(size=(200e-9, 20e-9, 5e-9), name="strip")
+mat   = fm.Material(name="Py", Ms=800e3, A=13e-12, alpha=0.5)
+
+magnet = fm.Ferromagnet(
+    name="strip",
+    geometry=strip,
+    material=mat,
+    m0=fm.init.random(seed=42),
+)
+
+problem = fm.Problem(
+    name="exchange_relax",
+    magnets=[magnet],
+    energy=[fm.Exchange()],
+    study=fm.Relaxation(
+        algorithm="llg_overdamped",
+        torque_tolerance=5e-2,
+        energy_tolerance=1e-21,
+        max_steps=50_000,
+        dynamics=fm.LLG(fixed_timestep=1e-13),
+        outputs=[
+            fm.SaveField("m", every=100e-12),
+            fm.SaveScalar("E_ex", every=10e-12),
+        ],
+    ),
+    discretization=fm.DiscretizationHints(
+        fdm=fm.FDM(cell=(2e-9, 2e-9, 5e-9)),
+    ),
+)
+```
